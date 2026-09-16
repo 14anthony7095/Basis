@@ -141,6 +141,8 @@ namespace Basis
         /// <summary>Why the last recording failed, or null. Cleared when a new one starts.</summary>
         public string LastFailure { get; private set; }
 
+        public Action<string> Saved;
+
         /// <summary>
         /// Adopts a started session and begins capturing into it. With <paramref name="nextSegment"/>
         /// given, the duration running out rolls the recording into whatever that returns instead
@@ -370,7 +372,7 @@ namespace Basis
             // paid for and about to land, and counting them would stall capture at a join.
             if (Session.FramesQueued + CountPendingReadbacks(Session) >= maxPendingFrames) return;
 
-            BasisHandHeldCamera.GetStreamBlitCrop(source, target, out Vector2 scale, out Vector2 offset);
+            BasisCameraRenderTargets.GetBlitCrop(source, target, out Vector2 scale, out Vector2 offset);
             if (flipVertically)
             {
                 // Readback rows come back bottom-up; a format that wants them top-down gets the
@@ -432,6 +434,14 @@ namespace Basis
             else
             {
                 BasisDebug.Log($"{label} saved: {session.FinalPath} ({session.FramesEncoded} frames).", BasisDebug.LogTag.Camera);
+                try
+                {
+                    Saved?.Invoke(session.FinalPath);
+                }
+                catch (Exception exception)
+                {
+                    BasisDebug.LogError($"{label} saved handler failed: {exception.Message}", BasisDebug.LogTag.Camera);
+                }
             }
         }
 

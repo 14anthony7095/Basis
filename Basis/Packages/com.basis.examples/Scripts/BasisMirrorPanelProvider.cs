@@ -7,7 +7,8 @@ namespace Basis.BasisUI.Mirrors
 {
     public class BasisMirrorPanelProvider : BasisMenuActionProvider<BasisMainMenu>
     {
-        public const string StaticTitle = "Mirror Settings";
+        public const string StaticTitleKey = "menu.provider.mirror";
+        public static string StaticTitle => BasisLocalization.Get(StaticTitleKey);
 
         private static readonly int[] ResolutionPresets = { 256, 512, 1024, 2048, 4096, 8192 };
         private static readonly int[] MsaaSampleCounts = { 1, 2, 4, 8 };
@@ -35,6 +36,9 @@ namespace Basis.BasisUI.Mirrors
         private PanelDropdown _presetDropdown;
         private PanelSlider _widthSlider;
         private PanelSlider _heightSlider;
+        private PanelElementDescriptor _placementGroup;
+        private PanelToggle _grabbableToggle;
+        private PanelToggle _moveWithPlayspaceToggle;
         private PanelDropdown _msaaDropdown;
         private PanelDropdown _depthDropdown;
         private PanelSlider _viewerCapSlider;
@@ -238,6 +242,9 @@ namespace Basis.BasisUI.Mirrors
             _presetDropdown = null;
             _widthSlider = null;
             _heightSlider = null;
+            _placementGroup = null;
+            _grabbableToggle = null;
+            _moveWithPlayspaceToggle = null;
             _msaaDropdown = null;
             _depthDropdown = null;
             _viewerCapSlider = null;
@@ -300,6 +307,32 @@ namespace Basis.BasisUI.Mirrors
                 _activeMirror.SurfaceHeight = v;
                 Persist();
                 RefreshSizeReadouts();
+            };
+
+            _placementGroup = PanelElementDescriptor.CreateNew(
+                PanelElementDescriptor.ElementStyles.Group, parent);
+            _placementGroup.SetTitle(BasisLocalization.Get("mirror.placement"));
+            _placementGroup.SetDescription(BasisLocalization.Get("mirror.placement.description"));
+            RectTransform placementContent = _placementGroup.ContentParent;
+
+            _grabbableToggle = PanelToggle.CreateNewEntry(placementContent);
+            _grabbableToggle.Descriptor.SetTitle(BasisLocalization.Get("mirror.grabbable"));
+            _grabbableToggle.Descriptor.SetDescription(BasisLocalization.Get("mirror.grabbable.description"));
+            _grabbableToggle.OnValueChanged = v =>
+            {
+                if (_activeMirror == null) return;
+                BasisMirrorSettingsStore.SetPersonalMirrorGrabbable(_activeMirror, v);
+                Persist();
+            };
+
+            _moveWithPlayspaceToggle = PanelToggle.CreateNewEntry(placementContent);
+            _moveWithPlayspaceToggle.Descriptor.SetTitle(BasisLocalization.Get("mirror.moveWithPlayspace"));
+            _moveWithPlayspaceToggle.Descriptor.SetDescription(BasisLocalization.Get("mirror.moveWithPlayspace.description"));
+            _moveWithPlayspaceToggle.OnValueChanged = v =>
+            {
+                if (_activeMirror == null) return;
+                BasisMirrorSettingsStore.SetPersonalMirrorMovesWithPlayspace(_activeMirror, v);
+                Persist();
             };
         }
 
@@ -684,6 +717,15 @@ namespace Basis.BasisUI.Mirrors
                 _widthSlider?.SetValueWithoutNotify(surface.x);
                 _heightSlider?.SetValueWithoutNotify(surface.y);
             }
+
+            bool personalMirror = BasisMirrorSettingsStore.IsPersonalMirror(_activeMirror);
+            _placementGroup?.SetActive(personalMirror);
+            if (personalMirror)
+            {
+                _grabbableToggle?.SetValueWithoutNotify(BasisMirrorSettingsStore.PersonalMirrorGrabbable(_activeMirror));
+                _moveWithPlayspaceToggle?.SetValueWithoutNotify(BasisMirrorSettingsStore.PersonalMirrorMovesWithPlayspace(_activeMirror));
+            }
+
             _viewerCapSlider?.SetValueWithoutNotify(_activeMirror.SecondaryViewerResolutionCap);
             string presetLabel = CurrentPresetLabel();
             if (presetLabel != null) _presetDropdown?.SetValueWithoutNotify(presetLabel);

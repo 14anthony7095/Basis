@@ -83,6 +83,7 @@ namespace Basis.ImagePickup
         public string Error;
         public BasisAnimatedImageData Animation;
         public NativeArray<Color32> PosterPixels;
+        public NativeArray<byte> Source;
         public long WorkerElapsedTicks;
 
         /// <summary>Transfers animation ownership to the caller.</summary>
@@ -93,12 +94,23 @@ namespace Basis.ImagePickup
             return animation;
         }
 
+        public NativeArray<byte> TakeSource()
+        {
+            NativeArray<byte> source = Source;
+            Source = default;
+            return source;
+        }
+
         public void Dispose()
         {
             Animation?.Dispose();
             Animation = null;
             if (PosterPixels.IsCreated)
                 PosterPixels.Dispose();
+            PosterPixels = default;
+            if (Source.IsCreated)
+                Source.Dispose();
+            Source = default;
         }
     }
 
@@ -107,7 +119,7 @@ namespace Basis.ImagePickup
     /// descriptors. Stage two decodes every frame in parallel into a single native pixel pool and composes
     /// the poster in Burst. The only managed work is source-file acquisition and the final Texture2D upload.
     /// </summary>
-    internal sealed class BasisBurstGifDecodeRequest : IDisposable
+    internal sealed class BasisBurstGifDecodeRequest : IBasisAnimationDecodeRequest
     {
         private enum RequestState
         {
@@ -116,6 +128,9 @@ namespace Basis.ImagePickup
             Complete,
         }
 
+        private readonly bool _buildPoster;
+        private readonly long _maxDecodedPixels;
+        private BasisBurstAnimationDecodeResult _adapted;
         private NativeArray<byte> _source;
         private NativeArray<BasisGifFrameScan> _scans;
         private NativeArray<BasisGifScanResult> _scanResult;
@@ -125,6 +140,7 @@ namespace Basis.ImagePickup
         private NativeArray<ushort> _prefixScratch;
         private NativeArray<byte> _suffixScratch;
         private NativeArray<byte> _stackScratch;
+        private NativeArray<Color32> _paletteScratch;
         private NativeArray<int> _decodeErrors;
         private NativeArray<Color32> _posterPixels;
         private JobHandle _handle;
@@ -139,15 +155,49 @@ namespace Basis.ImagePickup
             _state == RequestState.Complete || _handle.IsCompleted;
 
         public BasisBurstGifDecodeRequest(byte[] source)
+            : this(source?.Length ?? 0, true, BasisAnimationDecodeTrust.TrustedLocal)
         {
-            if (source == null || source.Length == 0)
-                throw new ArgumentException("GIF source is empty.", nameof(source));
-            if (source.Length > BasisImagePickupSettings.MaxAnimationSourceBytes)
-                throw new ArgumentOutOfRangeException(nameof(source), "GIF source exceeds the configured limit.");
+            try
+            {
+                _source.CopyFrom(source);
+                ScheduleScan();
+            }
+            catch
+            {
+                _handle.Complete();
+                DisposeAllNative();
+                throw;
+            }
+        }
+
+        internal BasisBurstGifDecodeRequest(NativeArray<byte> source, int length, bool buildPoster, BasisAnimationDecodeTrust trust)
+            : this(source.IsCreated && length <= source.Length ? length : 0, buildPoster, trust)
+        {
+            try
+            {
+                NativeArray<byte>.Copy(source, 0, _source, 0, length);
+                ScheduleScan();
+            }
+            catch
+            {
+                _handle.Complete();
+                DisposeAllNative();
+                throw;
+            }
+        }
+
+        private BasisBurstGifDecodeRequest(int length, bool buildPoster, BasisAnimationDecodeTrust trust)
+        {
+            if (length <= 0)
+                throw new ArgumentException("GIF source is empty.", nameof(length));
+            if (length > BasisImagePickupSettings.MaxAnimationSourceBytes)
+                throw new ArgumentOutOfRangeException(nameof(length), "GIF source exceeds the configured limit.");
 
             _startTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+            _buildPoster = buildPoster;
+            _maxDecodedPixels = BasisBurstGifDecoder.ResolveDecodedPixelLimit(trust);
             _reservedWorkingBytes =
-                BasisAnimatedImageData.EstimateGifDecodeWorkingBytes(source.Length);
+                BasisAnimatedImageData.EstimateGifDecodeWorkingBytes(length, _maxDecodedPixels);
             if (!BasisAnimatedImageData.TryReserveWorkingBytes(_reservedWorkingBytes, out string budgetError))
             {
                 _reservedWorkingBytes = 0;
@@ -156,16 +206,13 @@ namespace Basis.ImagePickup
             try
             {
                 _source = new NativeArray<byte>(
-                    source.Length,
+                    length,
                     Allocator.Persistent,
                     NativeArrayOptions.UninitializedMemory
                 );
-                _source.CopyFrom(source);
-                ScheduleScan();
             }
             catch
             {
-                _handle.Complete();
                 DisposeAllNative();
                 throw;
             }
@@ -184,6 +231,7 @@ namespace Basis.ImagePickup
                 Source = _source,
                 Frames = _scans,
                 Result = _scanResult,
+                MaxDecodedPixels = _maxDecodedPixels,
             }.Schedule();
             JobHandle.ScheduleBatchedJobs();
             _state = RequestState.Scan;
@@ -210,6 +258,35 @@ namespace Basis.ImagePickup
             if (_result?.Ok == true)
                 _resultClaimed = true;
             return _result;
+        }
+
+        bool IBasisAnimationDecodeRequest.TryComplete(out BasisBurstAnimationDecodeResult result)
+        {
+            result = null;
+            if (!TryComplete(out BasisBurstGifDecodeResult gifResult))
+                return false;
+            result = AdaptResult(gifResult);
+            return true;
+        }
+
+        BasisBurstAnimationDecodeResult IBasisAnimationDecodeRequest.Complete()
+        {
+            return AdaptResult(Complete());
+        }
+
+        private BasisBurstAnimationDecodeResult AdaptResult(BasisBurstGifDecodeResult gifResult)
+        {
+            if (_adapted != null)
+                return _adapted;
+            _adapted = new BasisBurstAnimationDecodeResult
+            {
+                Ok = gifResult?.Ok == true,
+                Error = gifResult?.Error ?? "GIF Burst decoder returned no result.",
+                Animation = gifResult?.TakeAnimation(),
+                WorkerElapsedTicks = gifResult?.WorkerElapsedTicks ?? 0,
+            };
+            gifResult?.Dispose();
+            return _adapted;
         }
 
         private void Advance(bool block)
@@ -266,11 +343,19 @@ namespace Basis.ImagePickup
                         Allocator.Persistent,
                         NativeArrayOptions.UninitializedMemory
                     );
-                    _posterPixels = new NativeArray<Color32>(
-                        checked(scan.CanvasWidth * scan.CanvasHeight),
+                    _paletteScratch = new NativeArray<Color32>(
+                        checked(scan.FrameCount * 256),
                         Allocator.Persistent,
                         NativeArrayOptions.UninitializedMemory
                     );
+                    if (_buildPoster)
+                    {
+                        _posterPixels = new NativeArray<Color32>(
+                            checked(scan.CanvasWidth * scan.CanvasHeight),
+                            Allocator.Persistent,
+                            NativeArrayOptions.UninitializedMemory
+                        );
+                    }
                 }
                 catch (Exception exception)
                 {
@@ -288,29 +373,34 @@ namespace Basis.ImagePickup
                     PrefixScratch = _prefixScratch,
                     SuffixScratch = _suffixScratch,
                     StackScratch = _stackScratch,
+                    PaletteScratch = _paletteScratch,
                     Errors = _decodeErrors,
                 };
                 JobHandle decodeHandle = decodeFramesJob.ScheduleParallelByRef(scan.FrameCount, 1, default);
-                var fillPosterJob = new BasisGifFillPosterJob
+                if (_buildPoster)
                 {
-                    Pixels = _posterPixels,
-                    Color = scan.BackgroundColor,
-                };
-                JobHandle clearHandle = fillPosterJob.ScheduleParallelByRef(_posterPixels.Length, 256, default);
-                var drawPosterJob = new BasisGifDrawPosterJob
-                {
-                    CanvasWidth = scan.CanvasWidth,
-                    Frames = _frames,
-                    FramePixels = _pixels,
-                    PosterPixels = _posterPixels,
-                };
-                JobHandle drawHandle = drawPosterJob.ScheduleParallelByRef(
-                    _scans[0].PixelCount,
-                    128,
-                    JobHandle.CombineDependencies(decodeHandle, clearHandle)
-                );
+                    var fillPosterJob = new BasisGifFillPosterJob
+                    {
+                        Pixels = _posterPixels,
+                        Color = scan.BackgroundColor,
+                        CanvasWidth = scan.CanvasWidth,
+                    };
+                    JobHandle clearHandle = fillPosterJob.ScheduleParallelByRef(scan.CanvasHeight, 16, default);
+                    var drawPosterJob = new BasisGifDrawPosterJob
+                    {
+                        CanvasWidth = scan.CanvasWidth,
+                        Frames = _frames,
+                        FramePixels = _pixels,
+                        PosterPixels = _posterPixels,
+                    };
+                    decodeHandle = drawPosterJob.ScheduleParallelByRef(
+                        _scans[0].Height,
+                        16,
+                        JobHandle.CombineDependencies(decodeHandle, clearHandle)
+                    );
+                }
 
-                _handle = drawHandle;
+                _handle = decodeHandle;
                 JobHandle.ScheduleBatchedJobs();
                 _state = RequestState.Decode;
                 return;
@@ -358,10 +448,12 @@ namespace Basis.ImagePickup
                 Ok = true,
                 Animation = animation,
                 PosterPixels = _posterPixels,
+                Source = _source,
                 WorkerElapsedTicks =
                     System.Diagnostics.Stopwatch.GetTimestamp() - _startTimestamp,
             };
             _posterPixels = default;
+            _source = default;
             DisposeTemporary();
             _state = RequestState.Complete;
         }
@@ -393,6 +485,8 @@ namespace Basis.ImagePickup
                 _suffixScratch.Dispose();
             if (_stackScratch.IsCreated)
                 _stackScratch.Dispose();
+            if (_paletteScratch.IsCreated)
+                _paletteScratch.Dispose();
             if (_decodeErrors.IsCreated)
                 _decodeErrors.Dispose();
         }
@@ -440,6 +534,76 @@ namespace Basis.ImagePickup
         public static BasisBurstGifDecodeRequest Schedule(byte[] source)
         {
             return new BasisBurstGifDecodeRequest(source);
+        }
+
+        internal static long ResolveDecodedPixelLimit(BasisAnimationDecodeTrust trust)
+        {
+            long limit = BasisImagePickupSettings.MaxAnimationDecodedFramePixels;
+            if (trust == BasisAnimationDecodeTrust.TrustedLocal)
+                return limit;
+            long remotePixels =
+                (
+                    BasisImagePickupSettings.MaxInboundAnimationDecodedBodyBytes
+                    - BasisBurstAnimationCodec.BodyHeaderBytes
+                    - (long)BasisImagePickupSettings.MaxAnimationFrames * BasisBurstAnimationCodec.FrameRecordBytes
+                ) / 4L;
+            return Math.Min(limit, Math.Max(1L, remotePixels));
+        }
+
+        internal static bool TryScan(
+            NativeArray<byte> source,
+            int length,
+            long maxDecodedPixels,
+            out int frameCount,
+            out int pixelCount,
+            out string error
+        )
+        {
+            frameCount = 0;
+            pixelCount = 0;
+            error = null;
+            if (!source.IsCreated || length <= 0 || length > source.Length)
+            {
+                error = "GIF source is invalid.";
+                return false;
+            }
+            if (maxDecodedPixels <= 0)
+            {
+                error = "GIF decoded pixel limit is invalid.";
+                return false;
+            }
+
+            NativeArray<byte> window = length == source.Length ? source : source.GetSubArray(0, length);
+            var frames = new NativeArray<BasisGifFrameScan>(
+                BasisImagePickupSettings.MaxAnimationFrames,
+                Allocator.TempJob,
+                NativeArrayOptions.UninitializedMemory
+            );
+            var result = new NativeArray<BasisGifScanResult>(1, Allocator.TempJob, NativeArrayOptions.ClearMemory);
+            try
+            {
+                new BasisGifScanJob
+                {
+                    Source = window,
+                    Frames = frames,
+                    Result = result,
+                    MaxDecodedPixels = maxDecodedPixels,
+                }.Run();
+                BasisGifScanResult scan = result[0];
+                if (scan.Error != BasisGifErrorCode.None)
+                {
+                    error = DescribeError(scan);
+                    return false;
+                }
+                frameCount = scan.FrameCount;
+                pixelCount = scan.PixelCount;
+                return true;
+            }
+            finally
+            {
+                frames.Dispose();
+                result.Dispose();
+            }
         }
 
         public static string DescribeError(BasisGifScanResult result)
@@ -519,6 +683,7 @@ namespace Basis.ImagePickup
         [WriteOnly]
         public NativeArray<BasisGifFrameScan> Frames;
         public NativeArray<BasisGifScanResult> Result;
+        public long MaxDecodedPixels;
 
         public void Execute()
         {
@@ -721,7 +886,7 @@ namespace Basis.ImagePickup
                 }
 
                 int framePixels = width * height;
-                if ((long)pixelOffset + framePixels > BasisImagePickupSettings.MaxAnimationDecodedFramePixels)
+                if ((long)pixelOffset + framePixels > MaxDecodedPixels)
                 {
                     result.ErrorFrame = frameCount;
                     Fail(ref result, BasisGifErrorCode.PixelBudgetExceeded, offset);
@@ -960,6 +1125,9 @@ namespace Basis.ImagePickup
         public NativeArray<byte> StackScratch;
 
         [NativeDisableParallelForRestriction]
+        public NativeArray<Color32> PaletteScratch;
+
+        [NativeDisableParallelForRestriction]
         public NativeArray<int> Errors;
 
         public void Execute(int frameIndex)
@@ -982,13 +1150,33 @@ namespace Basis.ImagePickup
 
             int dictionaryBase = frameIndex * 4096;
             int stackBase = frameIndex * 4097;
+            int paletteBase = frameIndex * 256;
+            int paletteCount = scan.PaletteCount;
+            for (int i = 0; i < paletteCount; i++)
+            {
+                int paletteOffset = scan.PaletteOffset + i * 3;
+                PaletteScratch[paletteBase + i] = new Color32(
+                    Source[paletteOffset],
+                    Source[paletteOffset + 1],
+                    Source[paletteOffset + 2],
+                    byte.MaxValue
+                );
+            }
+            if (scan.HasTransparency != 0 && scan.TransparentIndex < paletteCount)
+                PaletteScratch[paletteBase + scan.TransparentIndex] = default;
+
+            int width = scan.Width;
             int clearCode = 1 << scan.MinimumCodeSize;
             int endCode = clearCode + 1;
             int nextCode = endCode + 1;
             int codeSize = scan.MinimumCodeSize + 1;
             int oldCode = -1;
             byte firstCharacter = 0;
-            int outputIndex = 0;
+            bool validateLiterals = paletteCount < clearCode;
+            int remainingPixels = scan.PixelCount;
+            int row = 0;
+            int column = 0;
+            int rowStart = RowStart(scan, 0);
             bool sawEndCode = false;
             for (int i = 0; i < clearCode; i++)
                 SuffixScratch[dictionaryBase + i] = (byte)i;
@@ -1050,24 +1238,30 @@ namespace Basis.ImagePickup
                     Errors[frameIndex] = (int)BasisGifErrorCode.LzwReservedCode;
                     return;
                 }
+                if (validateLiterals && code >= paletteCount)
+                {
+                    Errors[frameIndex] = (int)BasisGifErrorCode.PaletteIndexOutOfRange;
+                    return;
+                }
 
-                firstCharacter = SuffixScratch[dictionaryBase + code];
+                firstCharacter = (byte)code;
                 StackScratch[stackBase + stackCount++] = firstCharacter;
+                if (stackCount > remainingPixels)
+                {
+                    Errors[frameIndex] = (int)BasisGifErrorCode.LzwOutputOverflow;
+                    return;
+                }
+                remainingPixels -= stackCount;
                 while (stackCount > 0)
                 {
-                    if (outputIndex >= scan.PixelCount)
+                    if (column == width)
                     {
-                        Errors[frameIndex] = (int)BasisGifErrorCode.LzwOutputOverflow;
-                        return;
+                        column = 0;
+                        row++;
+                        rowStart = RowStart(scan, row);
                     }
-                    byte paletteIndex = StackScratch[stackBase + --stackCount];
-                    if (paletteIndex >= scan.PaletteCount)
-                    {
-                        Errors[frameIndex] = (int)
-                            BasisGifErrorCode.PaletteIndexOutOfRange;
-                        return;
-                    }
-                    WritePixel(scan, outputIndex++, paletteIndex);
+                    Pixels[rowStart + column] = PaletteScratch[paletteBase + StackScratch[stackBase + --stackCount]];
+                    column++;
                 }
 
                 if (oldCode >= 0 && nextCode < 4096)
@@ -1086,34 +1280,17 @@ namespace Basis.ImagePickup
                 Errors[frameIndex] = (int)BasisGifErrorCode.LzwTruncated;
                 return;
             }
-            if (outputIndex != scan.PixelCount)
+            if (remainingPixels != 0)
                 Errors[frameIndex] = (int)BasisGifErrorCode.LzwOutputSizeMismatch;
         }
 
-        private void WritePixel(BasisGifFrameScan scan, int streamIndex, byte paletteIndex)
+        private static int RowStart(BasisGifFrameScan scan, int streamRow)
         {
-            int streamRow = streamIndex / scan.Width;
-            int x = streamIndex - streamRow * scan.Width;
             int gifRow =
                 scan.Interlaced != 0
                     ? InterlacedRow(streamRow, scan.Height)
                     : streamRow;
-            int unityRow = scan.Height - 1 - gifRow;
-            int destination = scan.PixelOffset + unityRow * scan.Width + x;
-
-            if (scan.HasTransparency != 0 && paletteIndex == scan.TransparentIndex)
-            {
-                Pixels[destination] = new Color32(0, 0, 0, 0);
-                return;
-            }
-
-            int paletteOffset = scan.PaletteOffset + paletteIndex * 3;
-            Pixels[destination] = new Color32(
-                Source[paletteOffset],
-                Source[paletteOffset + 1],
-                Source[paletteOffset + 2],
-                byte.MaxValue
-            );
+            return scan.PixelOffset + (scan.Height - 1 - gifRow) * scan.Width;
         }
 
         private static int InterlacedRow(int streamRow, int height)
@@ -1198,13 +1375,17 @@ namespace Basis.ImagePickup
     [BurstCompile]
     internal struct BasisGifFillPosterJob : IJobFor
     {
-        [WriteOnly]
+        [WriteOnly, NativeDisableParallelForRestriction]
         public NativeArray<Color32> Pixels;
         public Color32 Color;
+        public int CanvasWidth;
 
-        public void Execute(int index)
+        public void Execute(int row)
         {
-            Pixels[index] = Color;
+            int index = row * CanvasWidth;
+            int end = index + CanvasWidth;
+            while (index < end)
+                Pixels[index++] = Color;
         }
     }
 
@@ -1222,23 +1403,22 @@ namespace Basis.ImagePickup
         [NativeDisableParallelForRestriction]
         public NativeArray<Color32> PosterPixels;
 
-        public void Execute(int index)
+        public void Execute(int row)
         {
             BasisAnimatedImageFrame frame = Frames[0];
-            if (index >= frame.PixelCount)
+            if (row >= frame.Height)
                 return;
-            int x = index % frame.Width;
-            int y = index / frame.Width;
-            int destination = (frame.Y + y) * CanvasWidth + frame.X + x;
-            Color32 source = FramePixels[frame.PixelOffset + index];
-            if (frame.Blend == BasisAnimationBlend.Source || source.a == byte.MaxValue)
+            bool replace = frame.Blend == BasisAnimationBlend.Source;
+            int sourceIndex = frame.PixelOffset + row * frame.Width;
+            int destination = (frame.Y + row) * CanvasWidth + frame.X;
+            for (int x = 0; x < frame.Width; x++, sourceIndex++, destination++)
             {
-                PosterPixels[destination] = source;
-                return;
+                Color32 source = FramePixels[sourceIndex];
+                if (replace || source.a == byte.MaxValue)
+                    PosterPixels[destination] = source;
+                else if (source.a != 0)
+                    PosterPixels[destination] = BlendStraightOver(source, PosterPixels[destination]);
             }
-            if (source.a == 0)
-                return;
-            PosterPixels[destination] = BlendStraightOver(source, PosterPixels[destination]);
         }
 
         private static Color32 BlendStraightOver(Color32 source, Color32 destination)

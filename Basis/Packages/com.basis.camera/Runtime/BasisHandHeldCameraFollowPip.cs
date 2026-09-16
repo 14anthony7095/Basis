@@ -3,74 +3,44 @@ using Basis.Scripts.Drivers;
 using UnityEngine;
 using UnityEngine.AddressableAssets;
 using UnityEngine.ResourceManagement.AsyncOperations;
-
-/// <summary>How the detached camera is marked while it is off in the world.</summary>
-public enum BasisCameraDetachedMarker
-{
-    /// <summary>No marker.</summary>
-    Off = 0,
-    /// <summary>A solid puck model — the same one remote players see, and it's grabbable as a selfie stick.</summary>
-    Puck = 1,
-    /// <summary>A lightweight wireframe camera gizmo; cheaper and non-interactive.</summary>
-    Gizmo = 2,
-}
-
-/// <summary>
-/// A local marker shown whenever the camera has left your hand — following, flying, or
-/// world/playspace pinned — so you can see where it has gone, even when the camera body itself
-/// is hidden. Either a solid puck (the model remote players see, grabbable as a selfie stick) or
-/// a lightweight wireframe gizmo.
-/// </summary>
 public partial class BasisHandHeldCamera
 {
-    // Same addressable the network PIP driver instantiates. Its address is the full asset path
-    // (see BasisNetworkPIPCameraDriver), and the prefab must stay in com.basis.sdk for it.
-    private const string FollowPipPrefabAddress = "Packages/com.basis.sdk/Prefabs/UI/Camera Prefab/BasisCameraRemotePip.prefab";
-
-    /// <summary>Which marker to show while the camera is detached. Puck by default.</summary>
     public BasisCameraDetachedMarker detachedMarker = BasisCameraDetachedMarker.Puck;
-
-    /// <summary>
-    /// The layer both detached markers live on, or -1 where the project does not define it.
-    /// OverlayUI is what the capture camera culls and what <see cref="ManagedCaptureLayers"/>
-    /// keeps out of the Render Layers list, so nothing on it can reach a photo, a 360 or the
-    /// video feed — while the player, whose camera does render it, still sees the marker.
-    /// </summary>
-    public static int MarkerLayer => LayerMask.NameToLayer("OverlayUI");
-
-    /// <summary>
-    /// How far out along the lens axis the puck is parked from the capture camera, in metres at
-    /// default avatar scale.
-    ///
-    /// <para>It used to sit exactly on the camera, which is where the prop's own HUD is too, so on
-    /// the frame the camera detaches the two are coincident: the puck landed in the middle of the
-    /// panel and its grab box took the pointer the buttons under it wanted. The operator is always
-    /// behind the lens — the same fact <see cref="TryGetFocusDepth"/> leans on — so parking the
-    /// puck out along that axis puts it behind the panel from where they stand, where the panel
-    /// hides it and is what a pointer reaches first.</para>
-    /// </summary>
-    private const float FollowPuckLensOffset = 0.25f;
-
-    /// <summary>Where the puck sits relative to a capture camera at <paramref name="rotation"/>, in world space.</summary>
-    private static Vector3 FollowPuckOffset(Quaternion rotation) =>
-        rotation * new Vector3(0f, 0f, FollowPuckLensOffset * BasisHeightDriver.AvatarToDefaultRatioScaledWithAvatarScale);
-
-    private GameObject followPipInstance;
+    private readonly BasisCameraWireframeMarker wireframeMarker = new BasisCameraWireframeMarker();
+    private GameObject followPipInstance, gizmoGripInstance;
     private AsyncOperationHandle<GameObject> followPipHandle;
-    private bool followPipLoading;
-    private BasisPickupInteractable followPipPickup;
-    private bool followPipGrabbed;
+    private BasisCameraFollowPuckPickup followPipPickup, gizmoGripPickup;
+    private BoxCollider followPipGrabBox;
+    private Vector3 followPipPrefabScale = Vector3.one, followPipMeasuredSize;
+    private float detachedMarkerScale = 1f, appliedFollowPuckScale = -1f;
+    private bool followPipLoading, followPipGrabbed, gizmoGripGrabbed, gizmoGripLayered;
+    public float DetachedMarkerScale => detachedMarkerScale;
+    public float BaseDetachedMarkerScale => BasisHeightDriver.AvatarToDefaultRatioScaledWithAvatarScale;
+    private Transform FollowGripTransform
+    {
+        get
+        {
+            if (followPipGrabbed && followPipInstance != null) return followPipInstance.transform;
+            if (gizmoGripGrabbed && gizmoGripInstance != null) return gizmoGripInstance.transform;
+            return null;
+        }
+    }
+    public void SetDetachedMarkerScale(float scale)
+    {
+        if (float.IsNaN(scale) || float.IsInfinity(scale) || scale <= 0f) scale = 1f;
 
-    /// <summary>True while the player is holding the follow puck — a "selfie stick" grip on the camera.</summary>
-    public bool FollowPipGrabbed => followPipGrabbed && followPipInstance != null;
+        scale = Mathf.Clamp(scale, BasisCameraDetachedMarkers.MinScale, BasisCameraDetachedMarkers.MaxScale);
+        if (Mathf.Approximately(scale, detachedMarkerScale)) return;
 
-    /// <summary>While grabbed, the puck's transform is where the camera should be, less the parking offset.</summary>
+        detachedMarkerScale = scale;
+        ApplyFollowPuckScale();
+    }
     public bool TryGetFollowPipPose(out Vector3 pos, out Quaternion rot)
     {
-        if (FollowPipGrabbed)
+        Transform grip = FollowGripTransform;
+        if (grip != null)
         {
-            followPipInstance.transform.GetPositionAndRotation(out pos, out rot);
-            // Undo the parking offset, or taking hold of the puck would jump the camera by it.
+            grip.GetPositionAndRotation(out pos, out rot);
             pos -= FollowPuckOffset(rot);
             return true;
         }
@@ -78,30 +48,44 @@ public partial class BasisHandHeldCamera
         rot = Quaternion.identity;
         return false;
     }
-
-    /// <summary>Sets the detached-marker mode, tearing down whatever the previous mode had spawned.</summary>
     public void SetDetachedMarker(BasisCameraDetachedMarker mode)
     {
         if (detachedMarker == mode) return;
         detachedMarker = mode;
-        // Drop the visuals the old mode owned; the next tick rebuilds for the new one.
         if (mode != BasisCameraDetachedMarker.Puck) DespawnFollowPip();
         if (mode != BasisCameraDetachedMarker.Gizmo) HideDetachedGizmo();
     }
+    internal void GetNetworkedMarkerPose(out Vector3 position, out Quaternion rotation)
+    {
+        position = Vector3.zero;
+        rotation = Quaternion.identity;
+        if (captureCamera == null) return;
 
-    /// <summary>Per-frame: show the chosen marker while the camera is off in the world, else clear both.</summary>
+        captureCamera.transform.GetPositionAndRotation(out position, out rotation);
+
+        if (detachedMarker != BasisCameraDetachedMarker.Puck || !IsDetachedFromHand) return;
+
+        if (followPipInstance != null)
+        {
+            followPipInstance.transform.GetPositionAndRotation(out position, out rotation);
+            if (followPipGrabbed) rotation = ApplyGripRoll(rotation, cameraRollEnabled);
+            return;
+        }
+
+        position += FollowPuckOffset(rotation);
+    }
+    internal void SetDetachedMarkerResizeWithGesture(bool enabled)
+    {
+        if (followPipPickup != null) followPipPickup.enableScaleWithGesture = enabled;
+        if (gizmoGripPickup != null) gizmoGripPickup.enableScaleWithGesture = enabled;
+    }
+    private Vector3 FollowPuckOffset(Quaternion rotation) => rotation * new Vector3(0f, 0f, BasisCameraDetachedMarkers.ParkDistance(detachedMarkerScale) * BaseDetachedMarkerScale);
     private void UpdateFollowPip()
     {
         bool detached = IsDetachedFromHand;
 
-        if (!detached || detachedMarker != BasisCameraDetachedMarker.Puck)
-        {
-            DespawnFollowPip();
-        }
-        if (!detached || detachedMarker != BasisCameraDetachedMarker.Gizmo)
-        {
-            HideDetachedGizmo();
-        }
+        if (!detached || detachedMarker != BasisCameraDetachedMarker.Puck) DespawnFollowPip();
+        if (!detached || detachedMarker != BasisCameraDetachedMarker.Gizmo) HideDetachedGizmo();
 
         if (!detached) return;
 
@@ -115,35 +99,31 @@ public partial class BasisHandHeldCamera
                 break;
         }
     }
-
     private void UpdateFollowPuck()
     {
         if (followPipInstance == null)
         {
             SpawnFollowPip();
-            return; // Positioned once it finishes loading, and every frame after.
+            return;
         }
 
-        // While the player holds the puck it is the master — the camera tracks it (see
-        // MoveCameraFlying), so leave the transform to the pickup and don't drive it from the camera.
+        ApplyFollowPuckScale();
+
         if (followPipGrabbed) return;
 
         captureCamera.transform.GetPositionAndRotation(out Vector3 pos, out Quaternion rot);
         followPipInstance.transform.SetPositionAndRotation(pos + FollowPuckOffset(rot), rot);
     }
-
     private void SpawnFollowPip()
     {
-        // Async load in flight, or the camera is gone: nothing to do this frame.
         if (followPipLoading || captureCamera == null) return;
 
         followPipLoading = true;
-        followPipHandle = Addressables.LoadAssetAsync<GameObject>(FollowPipPrefabAddress);
+        followPipHandle = Addressables.LoadAssetAsync<GameObject>(BasisCameraDetachedMarkers.PuckPrefabAddress);
         followPipHandle.Completed += handle =>
         {
             followPipLoading = false;
 
-            // Follow may have ended, the mode changed, or the camera been destroyed while loading.
             if (this == null || detachedMarker != BasisCameraDetachedMarker.Puck || !IsDetachedFromHand || captureCamera == null)
             {
                 if (handle.IsValid()) Addressables.Release(handle);
@@ -160,175 +140,143 @@ public partial class BasisHandHeldCamera
             captureCamera.transform.GetPositionAndRotation(out Vector3 pos, out Quaternion rot);
             followPipInstance = Instantiate(handle.Result, pos + FollowPuckOffset(rot), rot);
             followPipInstance.name = "FollowCameraPip";
+            followPipPrefabScale = followPipInstance.transform.localScale;
+            appliedFollowPuckScale = -1f;
+            RegisterSpawnedObject(followPipInstance);
 
-            // Keep the marker out of the shot. The puck is parked out along the lens axis, square
-            // in front of it, so the layer is the only thing keeping the capture from filming it.
-            int overlayUi = MarkerLayer;
-            if (overlayUi >= 0) SetLayerRecursively(followPipInstance, overlayUi);
+            int overlayUi = BasisCameraCaptureLayers.Marker;
+            if (overlayUi >= 0) BasisCameraCaptureLayers.SetLayerRecursively(followPipInstance, overlayUi);
 
-            // Local-only marker: strip the networked-camera identity so nothing treats it as a
-            // real remote PIP. Its own colliders stay off; grabbing goes through the box below.
             if (followPipInstance.TryGetComponent(out BasisCameraRemotePip remotePip)) Destroy(remotePip);
-            foreach (Collider existing in followPipInstance.GetComponentsInChildren<Collider>(true))
-            {
-                existing.enabled = false;
-            }
+            foreach (Collider existing in followPipInstance.GetComponentsInChildren<Collider>(true)) existing.enabled = false;
 
             MakeFollowPipGrabbable(followPipInstance);
+            ApplyFollowPuckScale();
         };
     }
-
-    /// <summary>
-    /// Adds a grab box + pickup so the puck acts as a selfie stick: while held the camera tracks
-    /// it, and releasing hands control back to whatever the camera was doing (auto-follow resumes).
-    /// </summary>
     private void MakeFollowPipGrabbable(GameObject pip)
     {
-        BoxCollider box = pip.AddComponent<BoxCollider>();
-        if (TryGetLocalRendererBounds(pip, out Vector3 center, out Vector3 size))
+        followPipGrabBox = pip.AddComponent<BoxCollider>();
+        followPipMeasuredSize = Vector3.zero;
+        if (BasisCameraDetachedMarkers.TryGetLocalRendererBounds(pip, out Vector3 center, out Vector3 size))
         {
-            box.center = center;
-            // Give a small grab margin and a floor so a thin puck is still easy to grab.
-            box.size = Vector3.Max(size * 1.2f, Vector3.one * 0.08f);
+            followPipGrabBox.center = center;
+            followPipMeasuredSize = size;
         }
-        else
-        {
-            box.size = Vector3.one * 0.2f;
-        }
+        RefreshFollowPuckGrabBox();
 
-        followPipPickup = pip.AddComponent<BasisPickupInteractable>();
+        followPipPickup = CreateGripPickup(pip);
         followPipPickup.OnInteractStartEvent.AddListener(_ => followPipGrabbed = true);
         followPipPickup.OnInteractEndEvent.AddListener(_ => followPipGrabbed = false);
     }
-
-    private static void SetLayerRecursively(GameObject root, int layer)
+    private BasisCameraFollowPuckPickup CreateGripPickup(GameObject host)
     {
-        root.layer = layer;
-        Transform t = root.transform;
-        for (int Index = 0; Index < t.childCount; Index++)
-        {
-            SetLayerRecursively(t.GetChild(Index).gameObject, layer);
-        }
+        BasisCameraFollowPuckPickup pickup = host.AddComponent<BasisCameraFollowPuckPickup>();
+        pickup.Owner = this;
+        pickup.enableScaleWithGesture = ResizeWithGesture;
+        pickup.minScalePercent = BasisCameraDetachedMarkers.MinScale * 100f;
+        pickup.maxScalePercent = BasisCameraDetachedMarkers.MaxScale * 100f;
+        return pickup;
     }
-
-    private static bool TryGetLocalRendererBounds(GameObject root, out Vector3 center, out Vector3 size)
+    private void ApplyFollowPuckScale()
     {
-        center = Vector3.zero;
-        size = Vector3.zero;
-        Renderer[] renderers = root.GetComponentsInChildren<Renderer>(true);
-        if (renderers.Length == 0) return false;
+        if (followPipInstance == null) return;
 
-        Bounds world = renderers[0].bounds;
-        for (int Index = 1; Index < renderers.Length; Index++) world.Encapsulate(renderers[Index].bounds);
+        float scale = BaseDetachedMarkerScale * detachedMarkerScale;
+        if (Mathf.Approximately(scale, appliedFollowPuckScale)) return;
 
-        center = root.transform.InverseTransformPoint(world.center);
-        Vector3 scale = root.transform.lossyScale;
-        size = new Vector3(
-            world.size.x / Mathf.Max(1e-4f, Mathf.Abs(scale.x)),
-            world.size.y / Mathf.Max(1e-4f, Mathf.Abs(scale.y)),
-            world.size.z / Mathf.Max(1e-4f, Mathf.Abs(scale.z)));
-        return true;
+        appliedFollowPuckScale = scale;
+        followPipInstance.transform.localScale = followPipPrefabScale * scale;
+        RefreshFollowPuckGrabBox();
     }
-
+    private void RefreshFollowPuckGrabBox()
+    {
+        if (followPipGrabBox != null) followPipGrabBox.size = BasisCameraDetachedMarkers.GrabBoxSize(followPipMeasuredSize, followPipPrefabScale.x, detachedMarkerScale);
+    }
     private void DespawnFollowPip()
     {
         followPipGrabbed = false;
         followPipPickup = null;
+        followPipGrabBox = null;
+        followPipMeasuredSize = Vector3.zero;
+        followPipPrefabScale = Vector3.one;
+        appliedFollowPuckScale = -1f;
         if (followPipInstance != null)
         {
+            ForgetSpawnedObject(followPipInstance);
             Destroy(followPipInstance);
             followPipInstance = null;
         }
-        if (followPipHandle.IsValid())
-        {
-            Addressables.Release(followPipHandle);
-        }
+        if (followPipHandle.IsValid()) Addressables.Release(followPipHandle);
     }
-
-    // ---- Gizmo marker ---------------------------------------------------------------
-    // A wireframe camera drawn through BasisGizmoManager: a small lens quad set behind the camera
-    // plus four cone lines from its corners up to the lens. Rendered whenever active regardless of
-    // the debug gizmo master toggle (BasisGizmoManager.Render is not gated on it), so it works as
-    // a marker.
-    //
-    // Like the puck, it is kept out of the shot by living on MarkerLayer — the capture camera
-    // culls it. Sitting behind the lens is not enough on its own: the batch is built at the tail
-    // of LateUpdate from wherever the gizmo was last left, while the pose below is written in the
-    // before-render pass, so the shot is taken one frame ahead of the geometry and any movement
-    // between the two swings the marker into view. A 360 capture sees behind the camera anyway.
-
-    private const float DetachedGizmoDepth = 0.18f;
-    private const float DetachedGizmoHalfSize = 0.10f;
-    private static readonly Color DetachedGizmoColor = new Color(0.2f, 0.9f, 1f, 1f);
-
-    private int _gizmoQuadId;
-    private int[] _gizmoConeIds;
-    private bool _gizmoCreated;
-    private readonly Vector3[] _gizmoQuad = new Vector3[4];
-
     private void UpdateDetachedGizmo()
     {
-        if (captureCamera == null) { HideDetachedGizmo(); return; }
-
-        captureCamera.transform.GetPositionAndRotation(out Vector3 apex, out Quaternion rot);
-        float scale = BasisHeightDriver.AvatarToDefaultRatioScaledWithAvatarScale;
-        float depth = DetachedGizmoDepth * scale;
-        float half = DetachedGizmoHalfSize * scale;
-
-        // Drawn behind the lens (negative Z in camera space) so it reads as a small camera icon
-        // opening back toward the viewer rather than a cone across the subject. What keeps it out
-        // of the shot is the layer, not the placement — see the note above.
-        _gizmoQuad[0] = apex + rot * new Vector3(-half, -half, -depth);
-        _gizmoQuad[1] = apex + rot * new Vector3(half, -half, -depth);
-        _gizmoQuad[2] = apex + rot * new Vector3(half, half, -depth);
-        _gizmoQuad[3] = apex + rot * new Vector3(-half, half, -depth);
-
-        if (!_gizmoCreated)
+        if (captureCamera == null)
         {
-            // A project without the marker layer hands back -1, which SetGizmoLayer reads as
-            // "stay on the shared gizmo layer" — still a usable marker, just visible to the shot.
-            int markerLayer = MarkerLayer;
-            BasisGizmoManager.CreateLineGizmo("CameraDetachedGizmo", out _gizmoQuadId, _gizmoQuad, 0.004f, DetachedGizmoColor, loop: true);
-            BasisGizmoManager.SetGizmoLayer(_gizmoQuadId, markerLayer);
-            _gizmoConeIds = new int[4];
-            for (int Index = 0; Index < 4; Index++)
-            {
-                BasisGizmoManager.CreateLineGizmo("CameraDetachedGizmo", out _gizmoConeIds[Index], apex, _gizmoQuad[Index], 0.003f, DetachedGizmoColor);
-                BasisGizmoManager.SetGizmoLayer(_gizmoConeIds[Index], markerLayer);
-            }
-            _gizmoCreated = true;
+            HideDetachedGizmo();
             return;
         }
 
-        BasisGizmoManager.SetGizmoActive(_gizmoQuadId, true);
-        BasisGizmoManager.UpdateLineGizmo(_gizmoQuadId, _gizmoQuad);
-        for (int Index = 0; Index < 4; Index++)
-        {
-            BasisGizmoManager.SetGizmoActive(_gizmoConeIds[Index], true);
-            BasisGizmoManager.UpdateLineGizmo(_gizmoConeIds[Index], apex, _gizmoQuad[Index]);
-        }
-    }
+        captureCamera.transform.GetPositionAndRotation(out Vector3 apex, out Quaternion rot);
+        float scale = BaseDetachedMarkerScale * detachedMarkerScale, knobSize = BasisCameraWireframeMarker.KnobSize * scale;
+        Vector3 knob = apex + FollowPuckOffset(rot);
 
-    /// <summary>Parks the gizmo lines (kept for reuse). Idempotent.</summary>
+        UpdateGizmoGrip(knob, rot, knobSize);
+        wireframeMarker.Draw(apex, rot, scale, knob, knobSize);
+    }
+    private void UpdateGizmoGrip(Vector3 position, Quaternion rotation, float knobSize)
+    {
+        if (gizmoGripInstance == null) SpawnGizmoGrip(position, rotation);
+
+        gizmoGripInstance.transform.localScale = Vector3.one * BasisCameraDetachedMarkers.GripSize(knobSize);
+
+        if (!gizmoGripLayered && gizmoGripInstance.transform.childCount > 0)
+        {
+            int overlayUi = BasisCameraCaptureLayers.Marker;
+            if (overlayUi >= 0) BasisCameraCaptureLayers.SetLayerRecursively(gizmoGripInstance, overlayUi);
+            gizmoGripLayered = true;
+        }
+
+        if (!gizmoGripGrabbed) gizmoGripInstance.transform.SetPositionAndRotation(position, rotation);
+    }
+    private void SpawnGizmoGrip(Vector3 position, Quaternion rotation)
+    {
+        gizmoGripInstance = new GameObject("FollowCameraGizmoGrip");
+        gizmoGripInstance.transform.SetPositionAndRotation(position, rotation);
+        gizmoGripLayered = false;
+
+        int overlayUi = BasisCameraCaptureLayers.Marker;
+        if (overlayUi >= 0) gizmoGripInstance.layer = overlayUi;
+
+        RegisterSpawnedObject(gizmoGripInstance);
+        gizmoGripInstance.AddComponent<BoxCollider>();
+
+        gizmoGripPickup = CreateGripPickup(gizmoGripInstance);
+        gizmoGripPickup.OnInteractStartEvent.AddListener(_ => gizmoGripGrabbed = true);
+        gizmoGripPickup.OnInteractEndEvent.AddListener(_ => gizmoGripGrabbed = false);
+    }
+    private void DespawnGizmoGrip()
+    {
+        gizmoGripGrabbed = false;
+        gizmoGripPickup = null;
+        gizmoGripLayered = false;
+        if (gizmoGripInstance == null) return;
+
+        ForgetSpawnedObject(gizmoGripInstance);
+        Destroy(gizmoGripInstance);
+        gizmoGripInstance = null;
+    }
     private void HideDetachedGizmo()
     {
-        if (!_gizmoCreated) return;
-        BasisGizmoManager.SetGizmoActive(_gizmoQuadId, false);
-        for (int Index = 0; Index < _gizmoConeIds.Length; Index++)
-        {
-            BasisGizmoManager.SetGizmoActive(_gizmoConeIds[Index], false);
-        }
+        DespawnGizmoGrip();
+        wireframeMarker.Hide();
     }
-
-    /// <summary>Destroys the gizmo lines outright. Called from teardown.</summary>
     private void DestroyDetachedGizmo()
     {
-        if (!_gizmoCreated) return;
-        BasisGizmoManager.DestroyGizmo(_gizmoQuadId);
-        for (int Index = 0; Index < _gizmoConeIds.Length; Index++)
-        {
-            BasisGizmoManager.DestroyGizmo(_gizmoConeIds[Index]);
-        }
-        _gizmoCreated = false;
+        DespawnGizmoGrip();
+        wireframeMarker.Destroy();
     }
+#if UNITY_INCLUDE_TESTS
+    public void GetNetworkedMarkerPoseForTest(out Vector3 position, out Quaternion rotation) => GetNetworkedMarkerPose(out position, out rotation);
+#endif
 }

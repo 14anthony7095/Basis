@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -11,6 +12,10 @@ using static BasisEncryptionWrapper;
 public static class AssetBundleBuilder
 {
     public static async Task<(BasisBundleGenerated, InformationHash)> BuildAssetBundle(AssetBundleBuild[] BundledData, string targetDirectory, BasisAssetBundleObject settings, string assetBundleName, string mode, string password, BuildTarget buildTarget, bool isEncrypted = true)
+    {
+        return await BuildAssetBundle(BundledData, targetDirectory, settings, assetBundleName, mode, password, buildTarget, BasisBundleContentKind.None, isEncrypted);
+    }
+    public static async Task<(BasisBundleGenerated, InformationHash)> BuildAssetBundle(AssetBundleBuild[] BundledData, string targetDirectory, BasisAssetBundleObject settings, string assetBundleName, string mode, string password, BuildTarget buildTarget, BasisBundleContentKind contentKind, bool isEncrypted = true)
     {
         InformationHash Hash = new InformationHash();
         BasisBundleGenerated BasisBundleGenerated = new BasisBundleGenerated();
@@ -28,7 +33,19 @@ public static class AssetBundleBuilder
             options = settings.BuildAssetBundleOptions
         };
 
-        AssetBundleManifest manifest = BuildPipeline.BuildAssetBundles(BABP);
+        AssetBundleManifest manifest;
+        CultureInfo previousCulture = CultureInfo.CurrentCulture;
+        BasisBundleShaderStripScope.Begin(contentKind, settings, buildTarget);
+        try
+        {
+            CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
+            manifest = BuildPipeline.BuildAssetBundles(BABP);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = previousCulture;
+            BasisBundleShaderStripScope.End(assetBundleName);
+        }
 
         if (manifest != null)
         {

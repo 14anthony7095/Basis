@@ -9,7 +9,6 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using Unity.Profiling;
 using UnityEngine;
 using UnityEngine.AddressableAssets;
 using UnityEngine.ResourceManagement.AsyncOperations;
@@ -27,12 +26,6 @@ namespace Basis.Scripts.Avatar
         // The main-thread half of every avatar swap — load, reload, far LOD, range re-entry. It
         // reported nothing at all before, so a load-in spike could only be attributed to whatever
         // outer marker happened to contain it (transmit tick, bundle continuation, join).
-        static readonly ProfilerMarker sMarkerInstall = new ProfilerMarker("BasisDriver.Avatar.Install");
-        static readonly ProfilerMarker sMarkerUnregister = new ProfilerMarker("BasisDriver.Avatar.Install.UnregisterOld");
-        static readonly ProfilerMarker sMarkerDeleteLast = new ProfilerMarker("BasisDriver.Avatar.Install.DeleteLast");
-        static readonly ProfilerMarker sMarkerHarvest = new ProfilerMarker("BasisDriver.Avatar.Install.Harvest");
-        static readonly ProfilerMarker sMarkerCalibrateRemote = new ProfilerMarker("BasisDriver.Avatar.Calibrate");
-        static readonly ProfilerMarker sMarkerTrim = new ProfilerMarker("BasisDriver.Avatar.Install.PerfTrim");
 
         /// <summary>
         /// Cached prefab for the loading/fallback avatar. Loaded once, instantiated many times.
@@ -104,6 +97,52 @@ namespace Basis.Scripts.Avatar
             return string.IsNullOrEmpty(BasisLoadableBundle.BasisLocalEncryptedBundle.DownloadedBeeFileLocation);
         }
         public static long MaxDownloadSizeInMBRemote = 4L * 1024 * 1024 * 1024;
+        public static long RemoteDownloadLimit(BasisRemotePlayer Player)
+        {
+            return Player.AvatarAlwaysLoaded || BasisAvatarPerformanceLimits.BypassAllLimits ? 4L * 1024 * 1024 * 1024 : MaxDownloadSizeInMBRemote;
+        }
+        public static bool ClearDownloadLimitFailure(BasisRemotePlayer Player)
+        {
+            if (Player == null || !Player.HasFailedAvatarLoadGlobally)
+            {
+                return false;
+            }
+            long sectionBytes = DownloadSectionBytes(Player.AlwaysRequestedAvatar?.BasisBundleConnector);
+            if (sectionBytes <= MaxDownloadSizeInMBRemote || sectionBytes > RemoteDownloadLimit(Player))
+            {
+                return false;
+            }
+            Player.HasFailedAvatarLoadGlobally = false;
+            Player.AvatarLoadErrorMessage = null;
+            Player.OnAvatarFailedStateChanged?.Invoke();
+            return true;
+        }
+        private static long DownloadSectionBytes(BasisBundleConnector Connector)
+        {
+            BasisBundleGenerated[] sections = Connector?.BasisBundleGenerated;
+            if (sections == null)
+            {
+                return 0;
+            }
+            long platformBytes = -1, genericBytes = 0;
+            for (int Index = 0; Index < sections.Length; Index++)
+            {
+                BasisBundleGenerated section = sections[Index];
+                if (section == null || section.Platform == null)
+                {
+                    continue;
+                }
+                if (BasisBundleConnector.PlatformMatch(section.Platform))
+                {
+                    platformBytes = Math.Max(platformBytes, section.EndByte);
+                }
+                else if (genericBytes == 0 && BasisBundleConnector.IsGenericBundle(section))
+                {
+                    genericBytes = section.EndByte;
+                }
+            }
+            return platformBytes >= 0 ? platformBytes : genericBytes;
+        }
         /// <summary>
         /// Loads an avatar locally for a <see cref="BasisLocalPlayer"/>.
         /// Can handle download, addressable load, in-scene instantiation, or fallback.
@@ -289,7 +328,7 @@ namespace Basis.Scripts.Avatar
 
                             if (Mode == 0)
                             {
-                                Output = await DownloadAndLoadAvatar(BasisLoadableBundle, Player, Position, Rotation, token, MaxDownloadSizeInMBRemote);
+                                Output = await DownloadAndLoadAvatar(BasisLoadableBundle, Player, Position, Rotation, token, RemoteDownloadLimit(Player));
                             }
                             else
                             {
@@ -466,7 +505,7 @@ namespace Basis.Scripts.Avatar
                     // Leaving LastPerformanceInfo at its freshly-reset default lets
                     // the UI show a clean "no filter applied" state for this player.
                     BasisAvatarPerformanceLimits.PerformanceInfo trimInfo;
-                    using (sMarkerTrim.Auto())
+                    using (BasisAvatarMarkers.InstallPerfTrim.Auto())
                     {
                         trimInfo = remote.BypassPerformanceLimits
                             ? default
@@ -575,10 +614,10 @@ namespace Basis.Scripts.Avatar
             // and GameObject.Destroy only fires OnDisable at end-of-frame, which races with the
             // new avatar's JiggleRig registration below. Doing it here keeps tree state consistent.
             // The set was captured off the old avatar's harvest at its own load — no walk needed.
-            using var _installScope = sMarkerInstall.Auto();
+            using var _installScope = BasisAvatarMarkers.Install.Auto();
             if (Player.BasisAvatar != null)
             {
-                using var _unregisterScope = sMarkerUnregister.Auto();
+                using var _unregisterScope = BasisAvatarMarkers.InstallUnregisterOld.Auto();
                 Basis.Scripts.BasisSdk.Interactions.BasisJiggleGrabDriver.DropGrabsForPlayer(Player);
                 JiggleRig[] oldRigs = StoredJiggleRigsFor(Player);
                 for (int i = 0; i < oldRigs.Length; i++)
@@ -606,7 +645,7 @@ namespace Basis.Scripts.Avatar
                         break;
                 }
             }
-            using (sMarkerDeleteLast.Auto())
+            using (BasisAvatarMarkers.InstallDeleteLast.Auto())
             {
                 DeleteLastAvatar(Player);
             }
@@ -614,7 +653,7 @@ namespace Basis.Scripts.Avatar
             Player.BasisAvatar = avatar;
             Player.AvatarTransform = avatar.transform;
             Player.AvatarAnimatorTransform = avatar.Animator.transform;
-            using (sMarkerHarvest.Auto())
+            using (BasisAvatarMarkers.InstallHarvest.Auto())
             {
                 var loadHarvest = avatar.EnsureHarvest();
                 Player.BasisAvatar.Renders = loadHarvest.Renderers != null
@@ -647,6 +686,12 @@ namespace Basis.Scripts.Avatar
                     SetupRemoteAvatar(remotePlayer);
                     break;
             }
+
+            // No-op call preserved for a future safe redesign; BasisAvatarPsoReveal used to hide
+            // renderers and reveal them a few per frame to spread DX12/Vulkan/Metal's first-draw
+            // PSO-creation cost, but that let a real body sit fully visible before its clothing
+            // renderers caught up. See the safety note on BasisAvatarPsoReveal.
+            Basis.Scripts.Rendering.BasisAvatarPsoReveal.BeginStagedReveal(Player.BasisAvatar.Renders);
         }
 
         /// <summary>
@@ -778,7 +823,7 @@ namespace Basis.Scripts.Avatar
             }
             try
             {
-                using (sMarkerCalibrateRemote.Auto())
+                using (BasisAvatarMarkers.Calibrate.Auto())
                 {
                     Player.RemoteAvatarDriver.RemoteCalibration(Player);
                 }

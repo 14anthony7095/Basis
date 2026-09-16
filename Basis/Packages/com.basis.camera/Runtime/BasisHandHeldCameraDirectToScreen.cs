@@ -1,156 +1,91 @@
+using System.Collections.Generic;
 using UnityEngine;
-using UnityEngine.UI;
-
-/// <summary>
-/// Direct To Screen presentation. The camera ALWAYS renders into its own render texture — this
-/// just puts that texture on the main screen. Re-pointing the camera at the backbuffer instead
-/// (the old approach) gave the mode a second, different render path, which is why post-processing,
-/// MSAA and colour all behaved differently there. With one path they are identical by construction.
-///
-/// While the mode is on, the feed is also sized to the screen, so it covers it. A fixed 16:9 feed
-/// can only be barred, cropped or squashed into a window of another shape; re-rendering at the
-/// window's shape is the only one of those that neither throws pixels away nor distorts them, and
-/// it costs the same render either way. What the wider frame shows is set by the capture camera's
-/// gate fit, which is horizontal: the width of the shot stays put, so a window wider than the
-/// capture aspect trims the top and bottom of the frame and a taller one shows more of them. The
-/// saved photo is unaffected — it re-renders at the capture resolution when the shutter fires.
-///
-/// A screen-space overlay canvas is used deliberately: it is composited after all camera rendering,
-/// so the capture camera can never see it and there is no feedback loop.
-/// </summary>
 public partial class BasisHandHeldCamera
 {
-    private GameObject directToScreenGO;
-    private RawImage directToScreenImage;
-    private AspectRatioFitter directToScreenFitter;
-
-    /// <summary>Sorting order high enough to sit above the regular UI while mirroring.</summary>
-    private const int DirectToScreenSortingOrder = 30000;
-
-    /// <summary>
-    /// Ceiling on the screen-matched feed. The camera re-renders this every frame the mode is on,
-    /// so a 5K or 8K desktop would otherwise quietly multiply its cost; past this the image is
-    /// scaled up to the screen, which is what it did at every size before.
-    /// </summary>
-    private const int DirectToScreenMaxDimension = 3840;
-
-    /// <summary>
-    /// Pixel size the feed should render at to cover the screen exactly. Prefers the overlay
-    /// canvas's own rect — that is literally the area being filled — and falls back to
-    /// <see cref="Screen"/> for the first frame, before the canvas has laid out.
-    /// </summary>
-    private bool TryGetDirectToScreenFeedSize(out int width, out int height)
+    private BasisCameraDirectToScreenOutput directToScreenOutput;
+    public bool DirectToScreen { get; private set; }
+    public BasisCameraDirectToScreenFit DirectToScreenFit { get; private set; }
+    public Vector2 DirectToScreenAlignment { get; private set; } = BasisCameraDirectToScreen.DefaultAlignment;
+    public bool IsDirectToScreenPresenting => directToScreenOutput != null && directToScreenOutput.IsPresenting;
+    public bool DirectToScreenFeedFollowsWindow => DirectToScreenFit == BasisCameraDirectToScreenFit.MatchWindow && IsDirectToScreenPresenting;
+    public BasisCameraDirectToScreenState DirectToScreenState
     {
-        width = 0;
-        height = 0;
-
-        float pixelWidth = Screen.width;
-        float pixelHeight = Screen.height;
-
-        if (directToScreenGO != null && directToScreenGO.transform is RectTransform canvasRect)
+        get
         {
-            Rect rect = canvasRect.rect;
-            if (rect.width >= 1f && rect.height >= 1f)
+            if (!DirectToScreen) return BasisCameraDirectToScreenState.Off;
+            if (!BasisCameraDirectToScreen.IsSupported) return BasisCameraDirectToScreenState.Unsupported;
+            if (!BodyAllowsLiveFeed) return BasisCameraDirectToScreenState.NoOutputSocket;
+            if (!BasisCameraDirectToScreen.IsInVR) return BasisCameraDirectToScreenState.WaitingForVR;
+            return IsDirectToScreenPresenting ? BasisCameraDirectToScreenState.Presenting : BasisCameraDirectToScreenState.WaitingForVR;
+        }
+    }
+    public void SetDirectToScreen(bool enabled)
+    {
+        if (DirectToScreen == enabled) return;
+        DirectToScreen = enabled;
+
+        if (enabled)
+        {
+            IReadOnlyList<BasisHandHeldCamera> cameras = BasisHandHeldCameraRegistry.Cameras;
+            for (int Index = 0; Index < cameras.Count; Index++)
             {
-                pixelWidth = rect.width;
-                pixelHeight = rect.height;
+                BasisHandHeldCamera other = cameras[Index];
+                if (other != null && !ReferenceEquals(other, this) && other.DirectToScreen) other.SetDirectToScreen(false);
             }
         }
 
-        if (pixelWidth < 1f || pixelHeight < 1f) return false;
-
-        float clamp = Mathf.Min(1f, DirectToScreenMaxDimension / Mathf.Max(pixelWidth, pixelHeight));
-        width = Mathf.Max(16, Mathf.RoundToInt(pixelWidth * clamp));
-        height = Mathf.Max(16, Mathf.RoundToInt(pixelHeight * clamp));
-        return true;
+        RefreshDirectToScreen();
     }
-
-    private void SetDirectToScreenOverlayActive(bool active)
+    public void SetDirectToScreenFit(BasisCameraDirectToScreenFit fit)
     {
-        if (!active)
+        fit = BasisCameraDirectToScreen.SanitizeFit((int)fit);
+        if (DirectToScreenFit == fit) return;
+        DirectToScreenFit = fit;
+        if (PreviewFeedSizeIsStale()) ApplyPreviewResolution();
+    }
+    public void SetDirectToScreenAlignment(float horizontal, float vertical) => DirectToScreenAlignment = new Vector2(Mathf.Clamp01(horizontal), Mathf.Clamp01(vertical));
+    public void RefreshDirectToScreen()
+    {
+        if (WantsDirectToScreenNow())
         {
-            DespawnDirectToScreenOverlay();
-            // Back to the authored preview size: nothing is filling the screen with it any more,
-            // and leaving it at the window's shape would keep charging for pixels no one sees.
-            ApplyPreviewResolution();
+            if (directToScreenOutput == null) directToScreenOutput = BasisCameraDirectToScreenOutput.Create(this);
+            directToScreenOutput.Present(renderTexture);
+        }
+        else if (directToScreenOutput != null)
+        {
+            directToScreenOutput.Stop();
+        }
+
+        if (PreviewFeedSizeIsStale()) ApplyPreviewResolution();
+        UpdateRenderGate();
+    }
+    internal void GetPreviewFeedSize(out int width, out int height)
+    {
+        if (DirectToScreenFeedFollowsWindow)
+        {
+            directToScreenOutput.TryGetWindowSize(out int windowWidth, out int windowHeight);
+            BasisCameraDirectToScreen.MatchWindowFeedSize(PreviewCaptureWidth, PreviewCaptureHeight, windowWidth, windowHeight, out width, out height);
             return;
         }
-
-        if (directToScreenGO == null)
-        {
-            SpawnDirectToScreenOverlay();
-        }
-
-        UpdateDirectToScreenTexture();
+        width = PreviewCaptureWidth;
+        height = PreviewCaptureHeight;
     }
-
-    private void SpawnDirectToScreenOverlay()
+    private bool PreviewFeedSizeIsStale()
     {
-        directToScreenGO = new GameObject("CameraDirectToScreen");
-
-        Canvas canvas = directToScreenGO.AddComponent<Canvas>();
-        canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-        canvas.sortingOrder = DirectToScreenSortingOrder;
-
-        GameObject feed = new GameObject("Feed", typeof(RectTransform));
-        feed.transform.SetParent(directToScreenGO.transform, false);
-
-        directToScreenImage = feed.AddComponent<RawImage>();
-        directToScreenImage.raycastTarget = false;
-
-        // Centre-anchored, because AspectRatioFitter drives the size and warns on stretched anchors.
-        RectTransform rect = directToScreenImage.rectTransform;
-        rect.anchorMin = new Vector2(0.5f, 0.5f);
-        rect.anchorMax = new Vector2(0.5f, 0.5f);
-        rect.pivot = new Vector2(0.5f, 0.5f);
-        rect.anchoredPosition = Vector2.zero;
-
-        // The feed is sized to the screen, so this normally has nothing to do. It still matters for
-        // the frames where it cannot be: a still capture owns the RT at the capture aspect until its
-        // readback lands. Fitting bars those frames; stretching would visibly squash them.
-        directToScreenFitter = feed.AddComponent<AspectRatioFitter>();
-        directToScreenFitter.aspectMode = AspectRatioFitter.AspectMode.FitInParent;
-        directToScreenFitter.aspectRatio = 16f / 9f;
+        if (captureInFlight || renderTexture == null) return false;
+        GetPreviewFeedSize(out int width, out int height);
+        return renderTexture.width != width || renderTexture.height != height;
     }
-
-    /// <summary>
-    /// Keeps the feed matched to the screen and the overlay bound to it. Runs every frame the mode
-    /// is on, so resizing or moving the window between displays is picked up as it happens rather
-    /// than only when the mode is toggled.
-    /// </summary>
-    private void UpdateDirectToScreenTexture()
+    private bool WantsDirectToScreenNow() => BasisCameraDirectToScreen.ShouldPresent(DirectToScreen, BasisCameraDirectToScreen.IsInVR, BodyAllowsLiveFeed, BasisCameraDirectToScreen.IsSupported) && captureCamera != null && isActiveAndEnabled;
+    private void TickDirectToScreen()
     {
-        // Sized before it is bound: a resize replaces the RT, and the overlay must show the new one.
-        ApplyPreviewResolution();
-
-        if (directToScreenImage == null || renderTexture == null) return;
-
-        // The screen is a viewfinder, so it shows the focus-peaking overlay when there is one. The
-        // photo is re-rendered off the feed itself when the shutter fires and never sees it.
-        RenderTexture feed = ViewfinderTexture;
-        if (directToScreenImage.texture != feed)
-        {
-            directToScreenImage.texture = feed;
-        }
-
-        if (directToScreenFitter != null && renderTexture.height > 0)
-        {
-            float aspect = (float)renderTexture.width / renderTexture.height;
-            if (!Mathf.Approximately(directToScreenFitter.aspectRatio, aspect))
-            {
-                directToScreenFitter.aspectRatio = aspect;
-            }
-        }
+        if (WantsDirectToScreenNow() != IsDirectToScreenPresenting) RefreshDirectToScreen();
+        else if (PreviewFeedSizeIsStale()) ApplyPreviewResolution();
     }
-
-    private void DespawnDirectToScreenOverlay()
+    private void ShutdownDirectToScreen()
     {
-        if (directToScreenGO != null)
-        {
-            Destroy(directToScreenGO);
-            directToScreenGO = null;
-        }
-        directToScreenImage = null;
-        directToScreenFitter = null;
+        if (directToScreenOutput == null) return;
+        directToScreenOutput.Stop();
+        directToScreenOutput = null;
     }
 }

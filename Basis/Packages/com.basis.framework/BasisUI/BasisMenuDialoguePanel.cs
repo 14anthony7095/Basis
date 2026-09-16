@@ -20,7 +20,10 @@ namespace Basis.BasisUI
         {
             Title = "Dialogue",
             PanelSize = new Vector2(700, 500),
-            PanelPosition = new Vector3(0, -100, 0),
+            // Sits in front of the page it covers like every other overlay popup. Coplanar with
+            // the page (z 0) its collider ties with the page's on ray distance, which used to be
+            // the only thing deciding which of the two took a press.
+            PanelPosition = new Vector3(0, -100, -5),
         };
 
         public static string AcceptDefault = "Accept";
@@ -126,6 +129,24 @@ namespace Basis.BasisUI
             AlternateButton.rectTransform.SetSiblingIndex(DeclineButton.rectTransform.GetSiblingIndex());
             MatchButtonMetrics(AcceptButton, AlternateButton);
             AlternateButton.OnClicked += ResolveAlternate;
+        }
+
+        public PanelButton AddOption(string label, Action onChosen, bool closes = true)
+        {
+            if (string.IsNullOrEmpty(label) || onChosen == null) return null;
+            if (AcceptButton == null || DeclineButton == null) return null;
+
+            PanelButton button = PanelButton.CreateNew(AcceptButton.rectTransform.parent);
+            button.Descriptor.SetTitle(label);
+            button.ButtonStyling.SetStyle("Button Standard");
+            button.rectTransform.SetSiblingIndex(DeclineButton.rectTransform.GetSiblingIndex());
+            MatchButtonMetrics(AcceptButton, button);
+            button.OnClicked += () =>
+            {
+                onChosen();
+                if (closes) Resolve(true);
+            };
+            return button;
         }
 
         /// <summary>One row of the list <see cref="ShowDetails"/> puts under the description.</summary>

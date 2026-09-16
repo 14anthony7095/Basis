@@ -644,6 +644,380 @@ namespace Basis.ImagePickup.Tests
             }
         }
 
+        [Test]
+        public void GifPipelineShipsSourceBytesAsPayload()
+        {
+            byte[] source = Convert.FromBase64String(AnimatedGif);
+            long payloadBytesBefore = BasisNativeAnimationPayload.TotalAllocatedBytes;
+            using (var request = BasisAnimatedImageJobs.ScheduleGifDecode(source))
+            {
+                BasisGifDecodeJobResult worker = request.Complete();
+                Assert.That(worker.Ok, Is.True, worker.Error);
+                Assert.That(worker.AnimationNetworkError, Is.Null);
+                Assert.That(worker.AnimationPayload, Is.Not.Null);
+                Assert.That(worker.AnimationPayload.Format, Is.EqualTo(BasisNativeAnimationPayload.FormatGif));
+                Assert.That(worker.AnimationPayload.Length, Is.EqualTo(source.Length));
+                Assert.That(worker.AnimationPayload.AllocatedBytes, Is.EqualTo(source.Length));
+                Assert.That(worker.AnimationPayload.Bytes.ToArray(), Is.EqualTo(source));
+                Assert.That(
+                    BasisNativeAnimationPayload.TotalAllocatedBytes,
+                    Is.EqualTo(payloadBytesBefore + source.Length)
+                );
+            }
+            Assert.That(BasisNativeAnimationPayload.TotalAllocatedBytes, Is.EqualTo(payloadBytesBefore));
+        }
+
+        [Test]
+        public void GifPayloadRestoresThroughGifDecoder()
+        {
+            byte[] source = Convert.FromBase64String(InterlacedPreviousGif);
+            using var request = BasisAnimatedImageJobs.ScheduleGifDecode(source);
+            BasisGifDecodeJobResult worker = request.Complete();
+            Assert.That(worker.Ok, Is.True, worker.Error);
+            using BasisNativeAnimationPayload payload = worker.TakeAnimationPayload();
+            Assert.That(payload.Format, Is.EqualTo(BasisNativeAnimationPayload.FormatGif));
+            using IBasisAnimationDecodeRequest reload = BasisAnimatedImageJobs.ScheduleAnimationDecode(
+                payload,
+                BasisAnimationDecodeTrust.UntrustedRemote
+            );
+            BasisBurstAnimationDecodeResult restored;
+            while (!reload.TryComplete(out restored))
+                Thread.Yield();
+            Assert.That(restored.Ok, Is.True, restored.Error);
+            using (restored.Animation)
+            {
+                Assert.That(restored.Animation.FrameCount, Is.EqualTo(worker.Animation.FrameCount));
+                Assert.That(restored.Animation.GetFrame(1).Disposal, Is.EqualTo(BasisAnimationDisposal.Previous));
+                Assert.That(
+                    restored.Animation.CopyFramePixelsToManaged(1),
+                    Is.EqualTo(worker.Animation.CopyFramePixelsToManaged(1))
+                );
+            }
+        }
+
+        [Test]
+        public void GifScanReportsDecodedSizeAndHonorsPixelLimit()
+        {
+            byte[] source = Convert.FromBase64String(InterlacedPreviousGif);
+            using var native = new NativeArray<byte>(source, Allocator.Persistent);
+            Assert.That(
+                BasisBurstGifDecoder.TryScan(
+                    native,
+                    native.Length,
+                    BasisImagePickupSettings.MaxAnimationDecodedFramePixels,
+                    out int frameCount,
+                    out int pixelCount,
+                    out string error
+                ),
+                Is.True,
+                error
+            );
+            using BasisBurstGifDecodeRequest request = BasisBurstGifDecoder.Schedule(source);
+            using BasisBurstGifDecodeResult decoded = request.Complete();
+            Assert.That(decoded.Ok, Is.True, decoded.Error);
+            Assert.That(frameCount, Is.EqualTo(decoded.Animation.FrameCount));
+            Assert.That(pixelCount, Is.EqualTo(decoded.Animation.DecodedFramePixels));
+            Assert.That(
+                BasisBurstGifDecoder.TryScan(native, native.Length, pixelCount - 1, out _, out _, out error),
+                Is.False
+            );
+            Assert.That(error, Does.Contain("frame-pixel budget"));
+        }
+
+        [Test]
+        public void PosterlessGifRequestSkipsPosterAndReturnsSource()
+        {
+            byte[] source = Convert.FromBase64String(AnimatedGif);
+            using var native = new NativeArray<byte>(source, Allocator.Persistent);
+            using var request = new BasisBurstGifDecodeRequest(
+                native,
+                native.Length,
+                false,
+                BasisAnimationDecodeTrust.TrustedLocal
+            );
+            using BasisBurstGifDecodeResult result = request.Complete();
+            Assert.That(result.Ok, Is.True, result.Error);
+            Assert.That(result.PosterPixels.IsCreated, Is.False);
+            Assert.That(result.Source.IsCreated, Is.True);
+            Assert.That(result.Source.ToArray(), Is.EqualTo(source));
+            Assert.That(result.Animation.FrameCount, Is.EqualTo(2));
+        }
+
+        [Test]
+        public void RemoteGifDecodedPixelLimitNeverExceedsLocal()
+        {
+            long local = BasisBurstGifDecoder.ResolveDecodedPixelLimit(BasisAnimationDecodeTrust.TrustedLocal);
+            long remote = BasisBurstGifDecoder.ResolveDecodedPixelLimit(BasisAnimationDecodeTrust.UntrustedRemote);
+            Assert.That(local, Is.EqualTo(BasisImagePickupSettings.MaxAnimationDecodedFramePixels));
+            Assert.That(remote, Is.InRange(1L, local));
+        }
+
+        [Test]
+        public void DecodedFramesMatchTheirSourceIndicesAcrossPalettesInterlaceAndDictionaryResets()
+        {
+            var random = new System.Random(20260914);
+            var builder = new GifBuilder(200, 150);
+            builder.AddFrame(0, 0, 200, 150, RandomPalette(random, 256), 8, RandomIndices(random, 200 * 150, 256), 4);
+            builder.AddFrame(10, 20, 97, 61, RandomPalette(random, 16), 4, RunIndices(random, 97 * 61, 16), 4, interlaced: true);
+            builder.AddFrame(150, 100, 33, 17, RandomPalette(random, 2), 2, RandomIndices(random, 33 * 17, 2), 4, transparentIndex: 1, disposal: 2);
+            builder.AddFrame(5, 5, 180, 140, RandomPalette(random, 16), 4, RandomIndices(random, 180 * 140, 16), 4, disposal: 3);
+
+            using BasisBurstGifDecodeRequest request = BasisBurstGifDecoder.Schedule(builder.Finish());
+            using BasisBurstGifDecodeResult result = request.Complete();
+            Assert.That(result.Ok, Is.True, result.Error);
+            Assert.That(result.Animation.FrameCount, Is.EqualTo(builder.Frames.Count));
+            for (int frame = 0; frame < builder.Frames.Count; frame++)
+            {
+                Assert.That(
+                    result.Animation.CopyFramePixelsToManaged(frame),
+                    Is.EqualTo(builder.Frames[frame].ExpectedPixels()),
+                    $"frame {frame}"
+                );
+            }
+            Assert.That(result.Animation.GetFrame(2).Blend, Is.EqualTo(BasisAnimationBlend.Over));
+            Assert.That(result.Animation.GetFrame(2).Disposal, Is.EqualTo(BasisAnimationDisposal.Background));
+            Assert.That(result.Animation.GetFrame(3).Disposal, Is.EqualTo(BasisAnimationDisposal.Previous));
+            Assert.That(result.PosterPixels.ToArray(), Is.EqualTo(builder.Frames[0].ExpectedPixels()));
+        }
+
+        [Test]
+        public void AnIndexPastASmallColorTableFailsTheDecode()
+        {
+            var builder = new GifBuilder(4, 1);
+            builder.AddFrame(0, 0, 4, 1, new byte[] { 0, 0, 0, 255, 255, 255 }, 2, new byte[] { 0, 1, 3, 1 }, 4);
+
+            using BasisBurstGifDecodeRequest request = BasisBurstGifDecoder.Schedule(builder.Finish());
+            using BasisBurstGifDecodeResult result = request.Complete();
+            Assert.That(result.Ok, Is.False);
+            Assert.That(result.Error, Does.Contain("palette index"));
+        }
+
+        [TestCase(1, "exceeds the frame size")]
+        [TestCase(-1, "does not match the frame")]
+        public void LzwOutputThatDoesNotFillTheFrameExactlyFailsTheDecode(int extraPixels, string expectedError)
+        {
+            var random = new System.Random(7);
+            var builder = new GifBuilder(16, 8);
+            builder.AddFrame(0, 0, 16, 8, RandomPalette(random, 4), 2, RandomIndices(random, 16 * 8 + extraPixels, 4), 4);
+
+            using BasisBurstGifDecodeRequest request = BasisBurstGifDecoder.Schedule(builder.Finish());
+            using BasisBurstGifDecodeResult result = request.Complete();
+            Assert.That(result.Ok, Is.False);
+            Assert.That(result.Error, Does.Contain(expectedError));
+        }
+
+        private static byte[] RandomPalette(System.Random random, int colors)
+        {
+            var palette = new byte[colors * 3];
+            random.NextBytes(palette);
+            return palette;
+        }
+
+        private static byte[] RandomIndices(System.Random random, int count, int colors)
+        {
+            var indices = new byte[count];
+            for (int i = 0; i < count; i++)
+                indices[i] = (byte)random.Next(colors);
+            return indices;
+        }
+
+        private static byte[] RunIndices(System.Random random, int count, int colors)
+        {
+            var indices = new byte[count];
+            int written = 0;
+            while (written < count)
+            {
+                byte color = (byte)random.Next(colors);
+                int run = Math.Min(count - written, 1 + random.Next(40));
+                for (int i = 0; i < run; i++)
+                    indices[written++] = color;
+            }
+            return indices;
+        }
+
+        private sealed class GifFrame
+        {
+            public int Width;
+            public int Height;
+            public int TransparentIndex;
+            public byte[] Indices;
+            public byte[] PaletteRgb;
+
+            public Color32[] ExpectedPixels()
+            {
+                var pixels = new Color32[Width * Height];
+                for (int row = 0; row < Height; row++)
+                {
+                    for (int x = 0; x < Width; x++)
+                    {
+                        int index = Indices[row * Width + x];
+                        pixels[(Height - 1 - row) * Width + x] =
+                            index == TransparentIndex
+                                ? new Color32(0, 0, 0, 0)
+                                : new Color32(PaletteRgb[index * 3], PaletteRgb[index * 3 + 1], PaletteRgb[index * 3 + 2], 255);
+                    }
+                }
+                return pixels;
+            }
+        }
+
+        private sealed class GifBuilder
+        {
+            private readonly MemoryStream _stream = new MemoryStream();
+            public readonly System.Collections.Generic.List<GifFrame> Frames = new System.Collections.Generic.List<GifFrame>();
+
+            public GifBuilder(int width, int height)
+            {
+                _stream.Write(new[] { (byte)'G', (byte)'I', (byte)'F', (byte)'8', (byte)'9', (byte)'a' }, 0, 6);
+                WriteUInt16(width);
+                WriteUInt16(height);
+                _stream.WriteByte(0);
+                _stream.WriteByte(0);
+                _stream.WriteByte(0);
+            }
+
+            public void AddFrame(
+                int left,
+                int top,
+                int width,
+                int height,
+                byte[] paletteRgb,
+                int minimumCodeSize,
+                byte[] indices,
+                int delay,
+                bool interlaced = false,
+                int transparentIndex = -1,
+                int disposal = 1
+            )
+            {
+                Frames.Add(new GifFrame
+                {
+                    Width = width,
+                    Height = height,
+                    TransparentIndex = transparentIndex,
+                    Indices = indices,
+                    PaletteRgb = paletteRgb,
+                });
+
+                _stream.WriteByte(0x21);
+                _stream.WriteByte(0xF9);
+                _stream.WriteByte(4);
+                _stream.WriteByte((byte)((disposal << 2) | (transparentIndex >= 0 ? 1 : 0)));
+                WriteUInt16(delay);
+                _stream.WriteByte((byte)Math.Max(0, transparentIndex));
+                _stream.WriteByte(0);
+
+                int colors = paletteRgb.Length / 3;
+                int tableBits = 1;
+                while ((1 << tableBits) < colors)
+                    tableBits++;
+                _stream.WriteByte(0x2C);
+                WriteUInt16(left);
+                WriteUInt16(top);
+                WriteUInt16(width);
+                WriteUInt16(height);
+                _stream.WriteByte((byte)(0x80 | (interlaced ? 0x40 : 0) | (tableBits - 1)));
+                _stream.Write(paletteRgb, 0, paletteRgb.Length);
+                for (int pad = paletteRgb.Length; pad < (1 << tableBits) * 3; pad++)
+                    _stream.WriteByte(0);
+
+                _stream.WriteByte((byte)minimumCodeSize);
+                byte[] data = EncodeLzw(interlaced ? Interlace(indices, width, height) : indices, minimumCodeSize);
+                for (int offset = 0; offset < data.Length; offset += 255)
+                {
+                    int count = Math.Min(255, data.Length - offset);
+                    _stream.WriteByte((byte)count);
+                    _stream.Write(data, offset, count);
+                }
+                _stream.WriteByte(0);
+            }
+
+            public byte[] Finish()
+            {
+                _stream.WriteByte(0x3B);
+                return _stream.ToArray();
+            }
+
+            private void WriteUInt16(int value)
+            {
+                _stream.WriteByte((byte)value);
+                _stream.WriteByte((byte)(value >> 8));
+            }
+
+            private static byte[] Interlace(byte[] indices, int width, int height)
+            {
+                var stream = new byte[indices.Length];
+                int written = 0;
+                int[] starts = { 0, 4, 2, 1 };
+                int[] steps = { 8, 8, 4, 2 };
+                for (int pass = 0; pass < 4; pass++)
+                {
+                    for (int row = starts[pass]; row < height; row += steps[pass])
+                    {
+                        Buffer.BlockCopy(indices, row * width, stream, written, width);
+                        written += width;
+                    }
+                }
+                return stream;
+            }
+
+            private static byte[] EncodeLzw(byte[] indices, int minimumCodeSize)
+            {
+                var output = new System.Collections.Generic.List<byte>();
+                var dictionary = new System.Collections.Generic.Dictionary<int, int>();
+                int clearCode = 1 << minimumCodeSize;
+                int endCode = clearCode + 1;
+                int codeSize = minimumCodeSize + 1;
+                int nextCode = endCode + 1;
+                int bitBuffer = 0;
+                int bitCount = 0;
+
+                void Emit(int code)
+                {
+                    bitBuffer |= code << bitCount;
+                    bitCount += codeSize;
+                    while (bitCount >= 8)
+                    {
+                        output.Add((byte)bitBuffer);
+                        bitBuffer >>= 8;
+                        bitCount -= 8;
+                    }
+                }
+
+                Emit(clearCode);
+                int prefix = indices[0];
+                for (int i = 1; i < indices.Length; i++)
+                {
+                    int key = (prefix << 8) | indices[i];
+                    if (dictionary.TryGetValue(key, out int existing))
+                    {
+                        prefix = existing;
+                        continue;
+                    }
+                    Emit(prefix);
+                    if (nextCode < 4096)
+                    {
+                        dictionary[key] = nextCode++;
+                        if (nextCode > (1 << codeSize) && codeSize < 12)
+                            codeSize++;
+                    }
+                    else
+                    {
+                        Emit(clearCode);
+                        dictionary.Clear();
+                        codeSize = minimumCodeSize + 1;
+                        nextCode = endCode + 1;
+                    }
+                    prefix = indices[i];
+                }
+                Emit(prefix);
+                Emit(endCode);
+                if (bitCount > 0)
+                    output.Add((byte)bitBuffer);
+                return output.ToArray();
+            }
+        }
+
         private static byte[] InsertBytes(byte[] source, int offset, byte[] inserted)
         {
             var combined = new byte[source.Length + inserted.Length];

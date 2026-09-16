@@ -91,7 +91,7 @@ namespace Basis.Scripts.Device_Management.Devices
         /// <summary>
         /// Device pose before player scaling is applied.
         /// </summary>
-        public BasisCalibratedCoords UnscaledDeviceCoord = new BasisCalibratedCoords();
+        public BasisCalibratedCoords UnscaledDeviceCoord = BasisCalibratedCoords.Identity;
 
         /// <summary>
         /// Signed vertical offset (tracking space, metres) from this device's tracked origin to the
@@ -111,7 +111,7 @@ namespace Basis.Scripts.Device_Management.Devices
         /// <summary>
         /// Device pose after scaling/elevation adjustments.
         /// </summary>
-        public BasisCalibratedCoords ScaledDeviceCoord = new BasisCalibratedCoords();
+        public BasisCalibratedCoords ScaledDeviceCoord = BasisCalibratedCoords.Identity;
 
         /// <summary>
         /// World-space position offset added to the bone Control only (not the camera/raycast/transform), so a
@@ -287,6 +287,69 @@ namespace Basis.Scripts.Device_Management.Devices
                 BasisDebug.Log("has device events assigned already " + UniqueDeviceIdentifier, BasisDebug.LogTag.Input);
             }
         }
+        [System.NonSerialized]
+        public BasisCalibratedCoords PhysicalDeviceCoord = BasisCalibratedCoords.Identity;
+        [System.NonSerialized]
+        public string DeviceOffsetKey;
+        [System.NonSerialized]
+        public bool HasDeviceOffset;
+        [System.NonSerialized]
+        public Vector3 DeviceOffsetPosition;
+        [System.NonSerialized]
+        public Quaternion DeviceOffsetRotation = Quaternion.identity;
+        public virtual bool AppliesDeviceOffsetAtSource => false;
+        public bool SupportsDeviceOffset => AppliesDeviceOffsetAtSource || !(this is BasisInputController);
+        public void RefreshDeviceOffset()
+        {
+            if (!BasisDeviceOffsets.TryGetKey(this, out string key))
+            {
+                ClearDeviceOffset();
+                return;
+            }
+            DeviceOffsetKey = key;
+            BasisDeviceOffsets.TryGet(key, out Vector3 position, out Quaternion rotation);
+            SetDeviceOffset(position, rotation);
+        }
+        public void SetDeviceOffset(Vector3 position, Quaternion rotation)
+        {
+            DeviceOffsetPosition = position;
+            DeviceOffsetRotation = rotation;
+            HasDeviceOffset = !BasisDeviceOffsetMath.IsIdentity(position, rotation);
+        }
+        public void ClearDeviceOffset()
+        {
+            DeviceOffsetKey = null;
+            SetDeviceOffset(Vector3.zero, Quaternion.identity);
+        }
+        public void ResolveUnscaledFromPhysical(bool applyDeviceOffset)
+        {
+            if (applyDeviceOffset && HasDeviceOffset)
+            {
+                BasisDeviceOffsetMath.Compose(PhysicalDeviceCoord.position, PhysicalDeviceCoord.rotation, DeviceOffsetPosition, DeviceOffsetRotation, out UnscaledDeviceCoord.position, out UnscaledDeviceCoord.rotation);
+                return;
+            }
+            UnscaledDeviceCoord = PhysicalDeviceCoord;
+        }
+        public void GetPhysicalUnscaledPose(out Vector3 position, out Quaternion rotation)
+        {
+            if (AppliesDeviceOffsetAtSource)
+            {
+                position = PhysicalDeviceCoord.position;
+                rotation = PhysicalDeviceCoord.rotation;
+                return;
+            }
+            position = UnscaledDeviceCoord.position;
+            rotation = UnscaledDeviceCoord.rotation;
+        }
+        public void GetFinalScaledPose(out Vector3 position, out Quaternion rotation)
+        {
+            position = ScaledDeviceCoord.position;
+            rotation = ScaledDeviceCoord.rotation;
+            if (HasDeviceOffset && !AppliesDeviceOffsetAtSource)
+            {
+                BasisDeviceOffsetMath.ApplyScaled(ref position, ref rotation, DeviceOffsetPosition, DeviceOffsetRotation, BasisHeightDriver.DeviceScale);
+            }
+        }
         public void ComputeUnscaledDeviceCoord(ref BasisCalibratedCoords coords,Vector3 position)
         {
             // Vertical tracking-space offsets (VR only). Seated mode raises the eye to standing height;
@@ -374,6 +437,7 @@ namespace Basis.Scripts.Device_Management.Devices
             }
             hasRoleAssigned = true;
             trackedRole = Role;
+            RefreshDeviceOffset();
             HasControl = BasisLocalPlayer.Instance.LocalBoneDriver.FindBone(out Control, trackedRole);
             if (HasControl)
             {
@@ -495,6 +559,7 @@ namespace Basis.Scripts.Device_Management.Devices
             {
                 hasRoleAssigned = false;
                 trackedRole = BasisBoneTrackedRole.CenterEye;
+                ClearDeviceOffset();
                 Control = null;
                 HasControl = false;
             }
@@ -517,8 +582,7 @@ namespace Basis.Scripts.Device_Management.Devices
         /// </summary>
         public void ApplyFinalMovement()
         {
-            Vector3 localPosition = ScaledDeviceCoord.position;
-            Quaternion localRotation = ScaledDeviceCoord.rotation;
+            GetFinalScaledPose(out Vector3 localPosition, out Quaternion localRotation);
             // Tip the whole tracking rig (camera via the head device, controllers, trackers) to match the
             // avatar's play-space flip; no-op unless a flip is active. The character controller is untouched.
             BasisLocalPlayspaceMover.ApplyFlipToLocalPose(ref localPosition, ref localRotation);
@@ -560,7 +624,7 @@ namespace Basis.Scripts.Device_Management.Devices
             {
                 if (HasControl)
                 {
-                    BasisDebug.Log($"UnAssigning Tracker {Control.name}", BasisDebug.LogTag.Input);
+                    BasisDebug.Log($"UnAssigning Tracker {Control.Role}", BasisDebug.LogTag.Input);
                     Control.SetInverseOffset(Vector3.zero, Quaternion.identity);
                     Control.UseInverseOffset = false;
                 }
@@ -632,7 +696,7 @@ namespace Basis.Scripts.Device_Management.Devices
                     }
                     else
                     {
-                        BasisDebug.Log($"Skipping {Control.name}! device had multiple devices associated waiting on removal of {string.Join("", Control.DevicesWithRoles)}", BasisDebug.LogTag.Input);
+                        BasisDebug.Log($"Skipping {Control.Role}! device had multiple devices associated waiting on removal of {string.Join("", Control.DevicesWithRoles)}", BasisDebug.LogTag.Input);
                     }
                 }
                 else
@@ -646,7 +710,7 @@ namespace Basis.Scripts.Device_Management.Devices
                     Control.HasRigLayer = HasLayer;
                 }
 
-                BasisDebug.Log($"Set Tracker State for tracker {UniqueDeviceIdentifier} with bone {Control.name} as {Control.HasTracked} | {Control.HasRigLayer}", BasisDebug.LogTag.Input);
+                BasisDebug.Log($"Set Tracker State for tracker {UniqueDeviceIdentifier} with bone {Control.Role} as {Control.HasTracked} | {Control.HasRigLayer}", BasisDebug.LogTag.Input);
 
                 // Recompute whether ANY FBIK trackers remain — the animator checks this
                 // flag to decide if it should drive legs. Without this, removing trackers
@@ -913,7 +977,8 @@ namespace Basis.Scripts.Device_Management.Devices
         {
             if (hasRoleAssigned && Control.HasTracked != BasisHasTracked.HasNoTracker)
             {
-                Control.SetIncoming(ScaledDeviceCoord.position + ScaledControlPositionOffset, ScaledDeviceCoord.rotation);
+                GetFinalScaledPose(out Vector3 position, out Quaternion rotation);
+                Control.SetIncoming(position + ScaledControlPositionOffset, rotation);
             }
 
         }

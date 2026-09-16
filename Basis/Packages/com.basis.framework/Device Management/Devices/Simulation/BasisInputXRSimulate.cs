@@ -40,6 +40,7 @@ namespace Basis.Scripts.Device_Management.Devices.Simulation
         /// turning this on will mean that the positions get scaled relative to the overridden height.
         /// </summary>
         public bool AccountForScale = false;
+        private BasisBoneTrackedRole? namedRole;
         /// <summary>
         /// Polls the simulated device pose (and optional jitter), updates scaled coordinates,
         /// and forwards values to the bound bone control when a role is assigned.
@@ -99,9 +100,15 @@ namespace Basis.Scripts.Device_Management.Devices.Simulation
 
             if (hasRoleAssigned && Control.HasTracked != BasisHasTracked.HasNoTracker)
             {
-                Control.SetIncoming(ScaledDeviceCoord.position, ScaledDeviceCoord.rotation);
-                this.transform.name = Control.name;
-                this.FollowMovement.name = $"{Control.name} Moveable transform";
+                GetFinalScaledPose(out Vector3 finalPosition, out Quaternion finalRotation);
+                Control.SetIncoming(finalPosition, finalRotation);
+                if (namedRole != Control.Role)
+                {
+                    namedRole = Control.Role;
+                    string roleName = Control.Role.ToString();
+                    this.transform.name = roleName;
+                    this.FollowMovement.name = $"{roleName} Moveable transform";
+                }
             }
 
             ComputeRaycastDirection(ScaledDeviceCoord.position, ScaledDeviceCoord.rotation, Quaternion.identity);

@@ -3,126 +3,171 @@ using System.IO;
 using Basis.BasisUI;
 using Basis.Scripts.Networking;
 using UnityEngine;
-using UnityEngine.UI;
 
 /// <summary>
 /// General-tab "Backup &amp; Restore" section. Creating an archive is offered everywhere; restoring
 /// is Windows/Linux only (<see cref="BasisUserDataBackup.RestoreSupported"/>) and lists the archives
-/// found in the backups folder, plus a field for a path copied in from elsewhere.
+/// found in the backups folder, plus a field for a path copied in from elsewhere. Backup and Restore
+/// are each a lazy sub-section nested inside the outer Backup &amp; Restore toggle and start closed:
+/// nothing is built for a half the user leaves shut, and the archive list is scanned on a worker
+/// thread so opening Restore never stalls the menu on zip reads.
 /// </summary>
 public static class SettingsProviderBackup
 {
     private static bool _busy;
 
+    /// <summary>
+    /// The live "Create Backup Now" button, null while its section is closed. Held here rather than
+    /// captured because a backup keeps running after the section that started it is torn down, and
+    /// whichever button exists when it finishes is the one that has to stop saying "Working…".
+    /// </summary>
+    private static PanelButton _createButton;
+
+    /// <summary>
+    /// Bumped whenever the archive list is rebuilt or torn down. A scan that comes back after the
+    /// user collapsed Restore, closed the menu, or pressed Refresh again finds a newer number and
+    /// drops its result instead of filling rows that are gone or already being refilled.
+    /// </summary>
+    private static int _listGeneration;
+
     public static void BuildSection(RectTransform container, PanelElementDescriptor tabDescriptor)
     {
-        PanelElementDescriptor createGroup =
-            PanelElementDescriptor.CreateNew(PanelElementDescriptor.ElementStyles.Group, container);
-        createGroup.SetTitle(BasisLocalization.Get("settings.developer.backup.create.title"));
-        createGroup.SetDescription(BasisLocalization.Get("settings.developer.backup.create.description"));
+        // Opening one of the nested Backup/Restore sections changes a box several levels below
+        // tabDescriptor's own root. A single top-down ForceRebuild there measures each nested box
+        // before it has resized itself, so walk outward from the box that actually changed
+        // instead — see PanelElementDescriptor.RebuildLayoutChain.
+        void RebuildFrom(RectTransform changed) =>
+            PanelElementDescriptor.RebuildLayoutChain(changed, container);
 
-        RectTransform createParent = createGroup.ContentParent;
+        // A lazy section destroys its rows when it closes, so after that the header's own parent
+        // is the innermost thing whose height changed.
+        void RebuildSection(bool open, PanelElementDescriptor innermost, PanelSectionToggle header) =>
+            RebuildFrom(open && innermost != null ? innermost.rectTransform : header.transform.parent as RectTransform);
 
-        PanelToggle includeIdentity = PanelToggle.CreateNewEntry(createParent);
-        includeIdentity.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.backup.includeIdentity"));
-        includeIdentity.Descriptor.SetTooltip(BasisLocalization.Get("settings.developer.backup.includeIdentity.tooltip"));
-        includeIdentity.SetValueWithoutNotify(true);
+        // Restore's list only exists while that half is open. Create calls this after writing an
+        // archive so an open list shows the new file; a closed one re-reads the folder when it
+        // next opens anyway.
+        System.Action refreshList = null;
 
-        PanelToggle includeCache = PanelToggle.CreateNewEntry(createParent);
-        includeCache.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.backup.includeCache"));
-        includeCache.Descriptor.SetTooltip(BasisLocalization.Get("settings.developer.backup.includeCache.tooltip"));
-        includeCache.SetValueWithoutNotify(false);
+        PanelElementDescriptor createInfo = null;
+        PanelSectionToggle createToggle = null;
+        createToggle = PanelSectionToggleHelpers.CreateLazyBoxedSection(container,
+            BasisLocalization.Get("settings.developer.backup.create.title"), () =>
+        {
+            createInfo = CreateInfoRow(container, BasisLocalization.Get("settings.developer.backup.create.description"));
 
-        PanelButton createButton = PanelButton.CreateNew(createParent);
-        createButton.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.backup.create"));
-        createButton.Descriptor.SetTooltip(BasisLocalization.Get("settings.developer.backup.create.tooltip"));
+            PanelToggle includeIdentity = PanelToggle.CreateNewEntry(container);
+            includeIdentity.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.backup.includeIdentity"));
+            includeIdentity.Descriptor.SetTooltip(BasisLocalization.Get("settings.developer.backup.includeIdentity.tooltip"));
+            includeIdentity.SetValueWithoutNotify(true);
 
-        PanelButton revealButton = PanelButton.CreateNew(createParent);
-        revealButton.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.backup.openFolder"));
-        revealButton.Descriptor.SetTooltip(BasisLocalization.Get("settings.developer.backup.openFolder.tooltip"));
-        revealButton.OnClicked += RevealBackupsFolder;
+            PanelToggle includeCache = PanelToggle.CreateNewEntry(container);
+            includeCache.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.backup.includeCache"));
+            includeCache.Descriptor.SetTooltip(BasisLocalization.Get("settings.developer.backup.includeCache.tooltip"));
+            includeCache.SetValueWithoutNotify(false);
+
+            PanelButton createButton = PanelButton.CreateNew(container);
+            createButton.Descriptor.SetTooltip(BasisLocalization.Get("settings.developer.backup.create.tooltip"));
+            createButton.OnClicked += () =>
+                CreateBackup(includeCache.Value, includeIdentity.Value, () => refreshList?.Invoke());
+            _createButton = createButton;
+            ShowCreateBusy(_busy);
+
+            PanelButton revealButton = PanelButton.CreateNew(container);
+            revealButton.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.backup.openFolder"));
+            revealButton.Descriptor.SetTooltip(BasisLocalization.Get("settings.developer.backup.openFolder.tooltip"));
+            revealButton.OnClicked += RevealBackupsFolder;
+        }, false, open => RebuildSection(open, createInfo, createToggle));
 
         if (!BasisUserDataBackup.RestoreSupported)
         {
-            createButton.OnClicked += () => CreateBackup(createButton, includeCache.Value, includeIdentity.Value, null);
-
-            PanelElementDescriptor unsupported =
-                PanelElementDescriptor.CreateNew(PanelElementDescriptor.ElementStyles.Group, container);
-            unsupported.SetTitle(BasisLocalization.Get("settings.developer.backup.restore.title"));
-            unsupported.SetDescription(BasisLocalization.Get("settings.developer.backup.restore.unsupported"));
+            PanelElementDescriptor unsupported = null;
+            PanelSectionToggle unsupportedToggle = null;
+            unsupportedToggle = PanelSectionToggleHelpers.CreateLazyBoxedSection(container,
+                BasisLocalization.Get("settings.developer.backup.restore.title"),
+                () => unsupported = CreateInfoRow(container, BasisLocalization.Get("settings.developer.backup.restore.unsupported")),
+                false, open => RebuildSection(open, unsupported, unsupportedToggle));
             return;
         }
 
-        PanelElementDescriptor restoreGroup =
-            PanelElementDescriptor.CreateNew(PanelElementDescriptor.ElementStyles.Group, container);
-        restoreGroup.SetTitle(BasisLocalization.Get("settings.developer.backup.restore.title"));
-        restoreGroup.SetDescription(BasisLocalization.Get("settings.developer.backup.restore.description"));
-
-        RectTransform restoreParent = restoreGroup.ContentParent;
-
-        PanelToggle restoreIdentity = PanelToggle.CreateNewEntry(restoreParent);
-        restoreIdentity.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.backup.restoreIdentity"));
-        restoreIdentity.Descriptor.SetTooltip(BasisLocalization.Get("settings.developer.backup.restoreIdentity.tooltip"));
-        restoreIdentity.SetValueWithoutNotify(true);
-
-        PanelTextField pathField = PanelTextField.CreateNewEntry(restoreParent);
-        pathField.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.backup.path"));
-        pathField.Descriptor.SetTooltip(BasisLocalization.Get("settings.developer.backup.path.tooltip"));
-        pathField.SetValueWithoutNotify(string.Empty);
-
-        PanelButton pathRestoreButton = PanelButton.CreateNew(restoreParent);
-        pathRestoreButton.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.backup.restoreFromPath"));
-        pathRestoreButton.Descriptor.SetTooltip(BasisLocalization.Get("settings.developer.backup.restoreFromPath.tooltip"));
-
-        PanelElementDescriptor listGroup =
-            PanelElementDescriptor.CreateNew(PanelElementDescriptor.ElementStyles.Group, restoreParent);
-        listGroup.SetTitle(BasisLocalization.Get("settings.developer.backup.available"));
-
-        void Refresh()
+        PanelElementDescriptor restoreInfo = null;
+        PanelSectionToggle restoreToggle = null;
+        restoreToggle = PanelSectionToggleHelpers.CreateLazyBoxedSection(container,
+            BasisLocalization.Get("settings.developer.backup.restore.title"), () =>
         {
-            if (listGroup == null) return;
-            PopulateArchiveList(listGroup, restoreIdentity);
-            RebuildChain(listGroup, restoreGroup, tabDescriptor);
-        }
+            restoreInfo = CreateInfoRow(container, BasisLocalization.Get("settings.developer.backup.restore.description"));
 
-        PanelButton refreshButton = PanelButton.CreateNew(restoreParent);
-        refreshButton.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.backup.refresh"));
-        refreshButton.OnClicked += Refresh;
+            PanelToggle restoreIdentity = PanelToggle.CreateNewEntry(container);
+            restoreIdentity.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.backup.restoreIdentity"));
+            restoreIdentity.Descriptor.SetTooltip(BasisLocalization.Get("settings.developer.backup.restoreIdentity.tooltip"));
+            restoreIdentity.SetValueWithoutNotify(true);
 
-        createButton.OnClicked += () => CreateBackup(createButton, includeCache.Value, includeIdentity.Value, Refresh);
-        pathRestoreButton.OnClicked += () =>
-        {
-            string path = ReadField(pathField).Trim().Trim('"');
-            if (string.IsNullOrEmpty(path))
+            PanelTextField pathField = PanelTextField.CreateNewEntry(container);
+            pathField.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.backup.path"));
+            pathField.Descriptor.SetTooltip(BasisLocalization.Get("settings.developer.backup.path.tooltip"));
+            pathField.SetValueWithoutNotify(string.Empty);
+
+            PanelButton pathRestoreButton = PanelButton.CreateNew(container);
+            pathRestoreButton.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.backup.restoreFromPath"));
+            pathRestoreButton.Descriptor.SetTooltip(BasisLocalization.Get("settings.developer.backup.restoreFromPath.tooltip"));
+            pathRestoreButton.OnClicked += () =>
             {
-                Notify(BasisLocalization.Get("settings.developer.backup.path.missing"));
-                return;
-            }
-            ConfirmRestore(path, Path.GetFileName(path), restoreIdentity.Value);
-        };
+                string path = ReadField(pathField).Trim().Trim('"');
+                if (string.IsNullOrEmpty(path))
+                {
+                    Notify(BasisLocalization.Get("settings.developer.backup.path.missing"));
+                    return;
+                }
+                ConfirmRestore(path, Path.GetFileName(path), restoreIdentity.Value);
+            };
 
-        PopulateArchiveList(listGroup, restoreIdentity);
+            PanelElementDescriptor listGroup =
+                PanelElementDescriptor.CreateNew(PanelElementDescriptor.ElementStyles.Group, container);
+            listGroup.SetTitle(BasisLocalization.Get("settings.developer.backup.available"));
+
+            refreshList = () => PopulateArchiveList(listGroup, restoreIdentity, RebuildFrom);
+            refreshList();
+
+            PanelButton refreshButton = PanelButton.CreateNew(container);
+            refreshButton.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.backup.refresh"));
+            refreshButton.OnClicked += refreshList;
+        }, false, open =>
+        {
+            if (!open)
+            {
+                // The list went with the rows; a scan still running for it must not come back.
+                refreshList = null;
+                _listGeneration++;
+            }
+            RebuildSection(open, restoreInfo, restoreToggle);
+        });
     }
 
-    private static void PopulateArchiveList(PanelElementDescriptor listGroup, PanelToggle restoreIdentity)
+    /// <summary>
+    /// Fills the Available Backups box. The folder scan and every manifest read happen on a worker
+    /// thread behind a placeholder row; only the newest request is allowed to write the rows back.
+    /// </summary>
+    private static async void PopulateArchiveList(
+        PanelElementDescriptor listGroup, PanelToggle restoreIdentity, System.Action<RectTransform> rebuildFrom)
     {
-        RectTransform parent = listGroup.ContentParent;
+        RectTransform parent = listGroup != null ? listGroup.ContentParent : null;
         if (parent == null) return;
-        for (int i = parent.childCount - 1; i >= 0; i--)
-        {
-            Transform child = parent.GetChild(i);
-            child.SetParent(null, false);
-            Object.Destroy(child.gameObject);
-        }
 
-        List<BasisUserDataBackup.ArchiveInfo> archives = BasisUserDataBackup.ListArchives();
+        int generation = ++_listGeneration;
+
+        ClearRows(parent);
+        AddNoteRow(parent, BasisLocalization.Get("settings.developer.backup.scanning"));
+        rebuildFrom(parent);
+
+        List<BasisUserDataBackup.ArchiveInfo> archives = await BasisUserDataBackup.ListArchivesAsync();
+
+        if (generation != _listGeneration || listGroup == null || parent == null) return;
+
+        ClearRows(parent);
 
         if (archives.Count == 0)
         {
-            PanelPasswordField empty = PanelPasswordField.CreateNew(parent);
-            empty.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.backup.available"));
-            empty.SetPassword(BasisLocalization.Get("settings.developer.backup.none"));
-            return;
+            AddNoteRow(parent, BasisLocalization.Get("settings.developer.backup.none"));
         }
 
         foreach (BasisUserDataBackup.ArchiveInfo archive in archives)
@@ -136,11 +181,43 @@ public static class SettingsProviderBackup
             entry.OnClicked += () =>
                 ConfirmRestore(path, name, restoreIdentity == null || restoreIdentity.Value);
         }
+
+        rebuildFrom(parent);
+    }
+
+    private static void ClearRows(RectTransform parent)
+    {
+        for (int i = parent.childCount - 1; i >= 0; i--)
+        {
+            Transform child = parent.GetChild(i);
+            child.SetParent(null, false);
+            Object.Destroy(child.gameObject);
+        }
+    }
+
+    /// <summary>A read-only "Available Backups: …" line for the list's empty and scanning states.</summary>
+    private static void AddNoteRow(RectTransform parent, string text)
+    {
+        PanelPasswordField note = PanelPasswordField.CreateNew(parent);
+        note.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.backup.available"));
+        note.SetPassword(text);
+        note.SetValue(true);
+        note.DisableIcons();
+    }
+
+    private static PanelElementDescriptor CreateInfoRow(RectTransform parent, string text)
+    {
+        PanelElementDescriptor info =
+            PanelElementDescriptor.CreateNew(PanelElementDescriptor.ElementStyles.Group, parent);
+        info.SetBackgroundVisible(false);
+        info.SetTitle(string.Empty);
+        info.SetDescription(text);
+        return info;
     }
 
     private static string DescribeArchive(BasisUserDataBackup.ArchiveInfo archive)
     {
-        BasisUserDataBackup.Manifest manifest = BasisUserDataBackup.ReadManifest(archive.Path);
+        BasisUserDataBackup.Manifest manifest = archive.Manifest;
         if (manifest == null) return BasisLocalization.Get("settings.developer.backup.unreadable");
 
         string extras = string.Empty;
@@ -155,16 +232,19 @@ public static class SettingsProviderBackup
             manifest.AppVersion) + extras;
     }
 
-    private static async void CreateBackup(
-        PanelButton button, bool includeCache, bool includeIdentity, System.Action refresh)
+    private static void ShowCreateBusy(bool busy)
+    {
+        if (_createButton == null) return;
+
+        _createButton.Descriptor.SetTitle(BasisLocalization.Get(
+            busy ? "settings.developer.backup.working" : "settings.developer.backup.create"));
+    }
+
+    private static async void CreateBackup(bool includeCache, bool includeIdentity, System.Action refresh)
     {
         if (_busy) return;
         _busy = true;
-
-        if (button != null)
-        {
-            button.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.backup.working"));
-        }
+        ShowCreateBusy(true);
 
         BasisUserDataBackup.BackupResult result;
         try
@@ -174,10 +254,7 @@ public static class SettingsProviderBackup
         finally
         {
             _busy = false;
-            if (button != null)
-            {
-                button.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.backup.create"));
-            }
+            ShowCreateBusy(false);
         }
 
         if (!result.Success)
@@ -271,23 +348,6 @@ public static class SettingsProviderBackup
     {
         if (field == null || field._inputField == null) return string.Empty;
         return field._inputField.text ?? string.Empty;
-    }
-
-    private static void RebuildChain(
-        PanelElementDescriptor inner, PanelElementDescriptor middle, PanelElementDescriptor tabDescriptor)
-    {
-        if (inner != null && inner.ContentParent != null)
-        {
-            LayoutRebuilder.ForceRebuildLayoutImmediate(inner.ContentParent);
-        }
-        if (middle != null && middle.ContentParent != null)
-        {
-            LayoutRebuilder.ForceRebuildLayoutImmediate(middle.ContentParent);
-        }
-        if (tabDescriptor != null && tabDescriptor.ContentParent != null)
-        {
-            LayoutRebuilder.ForceRebuildLayoutImmediate(tabDescriptor.ContentParent);
-        }
     }
 
     private static void Notify(string message)

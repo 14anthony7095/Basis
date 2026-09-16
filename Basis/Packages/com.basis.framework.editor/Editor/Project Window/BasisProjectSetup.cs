@@ -58,7 +58,7 @@ public partial class BasisProjectSetup : EditorWindow
     private const string META_XR_CORE_PKG = "com.meta.xr.sdk.core";
 
     // Logo (Packages path)
-    private const string BASIS_LOGO_PATH = "Packages/com.basis.sdk/Textures/BasisLogoTemp.png";
+    private const string BASIS_LOGO_PATH = "Packages/com.basis.sdk/Textures/BasisLogo.svg";
     private Texture2D _basisLogo;
 
     // Basis default scenes (adjust as needed)
@@ -713,7 +713,7 @@ public class FollowTrackedRole : MonoBehaviour
         {
             _control = c;
             CancelInvoke(nameof(TryResolve));
-            // Optional: Debug.Log($""Resolved tracked role {role} to {_control.name}"");
+            // Optional: Debug.Log($""Resolved tracked role {role} to {_control.Role}"");
         }
     }
 }";

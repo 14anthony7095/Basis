@@ -555,7 +555,7 @@ public sealed class BasisHandHeldCameraGizmos
                 : camPos.y;
 
             int key = (int)camera.PinSpace ^ (camera.IsFlying ? 1 << 4 : 0) ^ (camera.IsModifierDriven ? 1 << 5 : 0) ^
-                      (camera.HandHeld.IsSelfieMode ? 1 << 6 : 0) ^ (camera.enableRecordingView ? 1 << 7 : 0) ^
+                      (camera.HandHeld.IsSelfieMode ? 1 << 6 : 0) ^
                       (camera.IsVideoOutputActive ? 1 << 8 : 0) ^ (camera.autoFocusFollowSubject ? 1 << 9 : 0) ^
                       (camera.useAutoLeveling ? 1 << 10 : 0) ^ (camera.useVRHandheldSmoothing ? 1 << 11 : 0) ^
                       (camera.useSmoothDrag ? 1 << 12 : 0) ^
@@ -593,7 +593,6 @@ public sealed class BasisHandHeldCameraGizmos
         AppendMode(ref written, camera.Modifiers.DrivesRotation, "driven-rot");
         AppendMode(ref written, camera.autoFocusFollowSubject, "autofocus");
         AppendMode(ref written, camera.HandHeld.IsSelfieMode, "selfie");
-        AppendMode(ref written, camera.enableRecordingView, "recording");
         AppendMode(ref written, camera.IsVideoOutputActive, "streaming");
         AppendMode(ref written, camera.useAutoLeveling, "auto-level");
         AppendMode(ref written, camera.useVRHandheldSmoothing, "vr-stab");
@@ -675,7 +674,7 @@ public sealed class BasisHandHeldCameraGizmos
         /// project without the layer hands back -1, which SetGizmoLayer reads as "stay where you
         /// are", leaving a usable gizmo that the shot can see.
         /// </summary>
-        private static int HiddenFromCaptureLayer => BasisHandHeldCamera.MarkerLayer;
+        private static int HiddenFromCaptureLayer => BasisCameraCaptureLayers.Marker;
 
         private readonly string _name;
         private readonly List<int> _spheres = new List<int>();

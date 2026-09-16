@@ -11,23 +11,7 @@ using static SerializableBasis;
 
 namespace Basis.Scripts.Networking.VoiceRecording
 {
-    /// <summary>Consent decision carried by a voice-record consent message.</summary>
-    public enum BasisVoiceConsentState : byte
-    {
-        Denied = 0,
-        Granted = 1,
-        Revoked = 2,
-    }
 
-    /// <summary>What a consent grant authorizes. Consent is scoped so a world-initiated route
-    /// request cannot silently unlock trusted disk/PCM recording.</summary>
-    public enum BasisVoiceConsentPurpose : byte
-    {
-        /// <summary>Capture the voice to PCM / clip / disk (trusted local API only).</summary>
-        Record = 0,
-        /// <summary>Re-emit the voice from a world object (issue #911; the only Cilbox-reachable purpose).</summary>
-        Route = 1,
-    }
 
     /// <summary>
     /// Consent-gated voice capture and re-routing for remote players. A local caller asks a
@@ -60,6 +44,7 @@ namespace Basis.Scripts.Networking.VoiceRecording
         private static float _lastPromptTime = -999f;
 
         private static readonly float[] _tickScratch = new float[RemoteOpusSettings.MaxFrameSize * 4];
+        private static Capture[] _tickSnapshot = Array.Empty<Capture>();
 
         /// <summary>A recordee granted us consent (recorder side).</summary>
         public static event Action<ushort> OnConsentGranted;
@@ -84,7 +69,6 @@ namespace Basis.Scripts.Networking.VoiceRecording
         public static bool HasRouteConsent(ushort playerId) => _grantedRoute.Contains(playerId);
         public static bool IsRecording(ushort playerId) => _captures.TryGetValue(playerId, out Capture c) && c.Recording != null;
 
-        // ==================== Recorder API ====================
 
         /// <summary>
         /// Asks <paramref name="target"/> for permission and, once granted, begins capturing
@@ -194,7 +178,6 @@ namespace Basis.Scripts.Networking.VoiceRecording
             RemoveCaptureIfEmpty(source.PlayerId, cap);
         }
 
-        // ==================== Recordee API ====================
 
         /// <summary>Revokes a previously-granted permission so <paramref name="recorderId"/> stops recording us.</summary>
         public static void RevokeConsentToRecorder(ushort recorderId)
@@ -258,7 +241,6 @@ namespace Basis.Scripts.Networking.VoiceRecording
             }
         }
 
-        // ==================== Lifecycle hooks ====================
 
         /// <summary>Drains active captures and resolves consent timeouts. Called once per frame.</summary>
         internal static void Tick()
@@ -271,11 +253,16 @@ namespace Basis.Scripts.Networking.VoiceRecording
             {
                 return;
             }
-            Capture[] snapshot = new Capture[_captures.Count];
-            _captures.Values.CopyTo(snapshot, 0);
-            for (int i = 0; i < snapshot.Length; i++)
+            int captureCount = _captures.Count;
+            if (_tickSnapshot.Length < captureCount)
             {
-                Capture cap = snapshot[i];
+                _tickSnapshot = new Capture[Math.Max(4, captureCount * 2)];
+            }
+            _captures.Values.CopyTo(_tickSnapshot, 0);
+            for (int i = 0; i < captureCount; i++)
+            {
+                Capture cap = _tickSnapshot[i];
+                _tickSnapshot[i] = null;
                 if (cap.Recording != null && cap.DecodedSink != null)
                 {
                     int n;
@@ -297,8 +284,8 @@ namespace Basis.Scripts.Networking.VoiceRecording
             }
         }
 
-        /// <summary>Called when a shout source is (re)created so an active tap follows the shout receiver.</summary>
-        internal static void OnShoutReceiverCreated(ushort playerId, BasisAudioReceiver shoutReceiver)
+        /// <summary>Called when an announce source is (re)created so an active tap follows the announce receiver.</summary>
+        internal static void OnAnnounceReceiverCreated(ushort playerId, BasisAudioReceiver announceReceiver)
         {
             if (_captures.TryGetValue(playerId, out Capture cap))
             {
@@ -637,7 +624,7 @@ namespace Basis.Scripts.Networking.VoiceRecording
                 }
             }
 
-            /// <summary>Installs the current tap delegates on the normal and shout receivers.</summary>
+            /// <summary>Installs the current tap delegates on the normal and announce receivers.</summary>
             public void RefreshTaps()
             {
                 Action<float[], int> decoded = (Recording != null && DecodedSink != null) ? WriteDecoded : null;
@@ -649,10 +636,10 @@ namespace Basis.Scripts.Networking.VoiceRecording
                     recv.AudioReceiverModule.OnDecodedFrame = decoded;
                     recv.AudioReceiverModule.OnEncodedFrame = encoded;
                 }
-                if (BasisShoutAudioDriver.TryGetReceiver(PlayerId, out BasisAudioReceiver shoutReceiver) && shoutReceiver != null)
+                if (BasisAnnounceAudioDriver.TryGetReceiver(PlayerId, out BasisAudioReceiver announceReceiver) && announceReceiver != null)
                 {
-                    shoutReceiver.OnDecodedFrame = decoded;
-                    shoutReceiver.OnEncodedFrame = encoded;
+                    announceReceiver.OnDecodedFrame = decoded;
+                    announceReceiver.OnEncodedFrame = encoded;
                 }
             }
 
@@ -664,10 +651,10 @@ namespace Basis.Scripts.Networking.VoiceRecording
                     recv.AudioReceiverModule.OnDecodedFrame = null;
                     recv.AudioReceiverModule.OnEncodedFrame = null;
                 }
-                if (BasisShoutAudioDriver.TryGetReceiver(PlayerId, out BasisAudioReceiver shoutReceiver) && shoutReceiver != null)
+                if (BasisAnnounceAudioDriver.TryGetReceiver(PlayerId, out BasisAudioReceiver announceReceiver) && announceReceiver != null)
                 {
-                    shoutReceiver.OnDecodedFrame = null;
-                    shoutReceiver.OnEncodedFrame = null;
+                    announceReceiver.OnDecodedFrame = null;
+                    announceReceiver.OnEncodedFrame = null;
                 }
             }
 

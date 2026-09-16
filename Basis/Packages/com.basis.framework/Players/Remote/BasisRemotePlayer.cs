@@ -257,6 +257,23 @@ namespace Basis.Scripts.BasisSdk.Players
             OnTalkModeChanged?.Invoke();
         }
 
+        public bool AdminShoutHeld;
+
+        public bool IsShouting => TalkMode == BasisTalkMode.Shout || AdminShoutHeld;
+
+        public void SetAdminShoutHeld(bool held)
+        {
+            AdminShoutHeld = held;
+            if (held)
+            {
+                if (TalkMode != BasisTalkMode.Announce) SetTalkMode(BasisTalkMode.Shout);
+            }
+            else if (TalkMode == BasisTalkMode.Shout)
+            {
+                SetTalkMode(BasisTalkMode.Normal);
+            }
+        }
+
         /// <summary>
         /// Whether this player has muted their own microphone. Driven from the network
         /// by <see cref="BasisTalkModeManager"/> and shown on the nameplate.
@@ -332,10 +349,11 @@ namespace Basis.Scripts.BasisSdk.Players
         public const float AvatarRangeDebounceSeconds = 0.5f;
 
         /// <summary>
-        /// Current mesh LOD level (0 = closest, 3 = furthest). Set by BasisTransmissionResults.
+        /// Current pose LOD level (0 = closest, 3 = furthest). Set by BasisTransmissionResults.
         /// Used to control pose update frequency — distant players update less often.
         /// </summary>
         public short CurrentLodLevel;
+        public short CurrentMeshLodLevel;
 
         /// <summary>
         /// Frame counter for LOD-based pose skip. When > 0, SetHumanPose and muscle
@@ -449,8 +467,23 @@ namespace Basis.Scripts.BasisSdk.Players
         /// <see cref="Basis.Scripts.Avatar.BasisAvatarPerformanceLimits.BypassAllLimits"/>
         /// toggle. Resets to false every launch, every reconnect, and every fresh
         /// player join, so there's no accidental "I forgot I disabled the filter for Alice".
+        /// Implies <see cref="AvatarAlwaysLoaded"/>: turning the filter off for one player
+        /// is a request to see that avatar, so it also exempts them from spatial culling.
         /// </summary>
-        public bool BypassPerformanceLimits;
+        public bool BypassPerformanceLimits
+        {
+            get => _bypassPerformanceLimits;
+            set
+            {
+                if (_bypassPerformanceLimits == value)
+                {
+                    return;
+                }
+                _bypassPerformanceLimits = value;
+                Basis.Scripts.Rendering.BasisAvatarVisibility.OnAvatarAlwaysLoadedChanged(this);
+            }
+        }
+        private bool _bypassPerformanceLimits;
 
         /// <summary>
         /// Per-player override mirrored from <see cref="BasisPlayerSettingsData.AlwaysShowAvatar"/>.
@@ -468,10 +501,19 @@ namespace Basis.Scripts.BasisSdk.Players
                     return;
                 }
                 _alwaysShowAvatar = value;
-                Basis.Scripts.Rendering.BasisAvatarVisibility.OnAlwaysShowAvatarChanged(this);
+                Basis.Scripts.Rendering.BasisAvatarVisibility.OnAvatarAlwaysLoadedChanged(this);
             }
         }
         private bool _alwaysShowAvatar;
+
+        /// <summary>
+        /// This player's real avatar is loaded no matter what the spatial optimizations say —
+        /// distance range, the max-visible-avatar cap, the view-cone filter and the shadow-LOD
+        /// cull all skip them, and nothing <see cref="Basis.Scripts.Avatar.BasisAvatarPerformanceLimits.Evaluate"/>
+        /// checks can push them to the fallback. Blocking, a failed load and an explicit Hide
+        /// still take precedence.
+        /// </summary>
+        public bool AvatarAlwaysLoaded => AlwaysShowAvatar || BypassPerformanceLimits;
 
         /// <summary>
         /// Per-player override mirrored from <see cref="BasisPlayerSettingsData.AvatarInteraction"/>.
@@ -614,6 +656,10 @@ namespace Basis.Scripts.BasisSdk.Players
         /// </remarks>
         public async void ReloadAvatar()
         {
+            if (IsDestroyed)
+            {
+                return;
+            }
             if (AlwaysRequestedAvatar != null)
             {
                 await CreateAvatar(AlwaysRequestedMode, AlwaysRequestedAvatar);
@@ -621,6 +667,15 @@ namespace Basis.Scripts.BasisSdk.Players
         }
         public bool IsLoadingAnAvatar = false;
         private bool _reloadQueuedDuringLoad = false;
+        private BasisAvatarPerformanceLimits.Result EvaluatePerformanceGate(BasisLoadableBundle Bundle)
+        {
+            if (BasisAvatarFactory.IsLoadingAvatar(Bundle))
+            {
+                return BasisAvatarPerformanceLimits.Result.Pass;
+            }
+            return BasisAvatarPerformanceLimits.EvaluateForPlayer(Bundle.BasisBundleConnector, AvatarAlwaysLoaded);
+        }
+
         /// <summary>
         /// Creates or replaces the current avatar using the provided load mode and bundle.
         /// Applies user visibility settings and distance gating before loading,
@@ -651,6 +706,15 @@ namespace Basis.Scripts.BasisSdk.Players
             IsLoadingAnAvatar = true;
             BasisPlayerSettingsData BasisPlayerSettingsData = default;
             bool farInstallPending = false;
+            // Queued reruns drain in a loop, NOT via `await CreateAvatar(...)` — the recursive
+            // tail linked every rerun queued during a load into one await tower, and when a
+            // churn window ended (range flap / avatar-change messages landing during slow
+            // loads, worst on DX12 where PSO creation stretches the load) the tower unwound as
+            // a single inline continuation cascade: ~1100 levels overflowed the main-thread
+            // stack (the 2026-08-31 player crash dumps).
+            while (true)
+            {
+            farInstallPending = false;
             try
             {
                 // Fetch per-player visibility settings. The cached probe is synchronous and is the
@@ -683,12 +747,9 @@ namespace Basis.Scripts.BasisSdk.Players
                 // download/instantiate avatars that exceed any enabled limit. Skipped
                 // for the fallback/loading avatar itself — otherwise a silly MaxBones=0
                 // setting would block the fallback and leave the player headless.
-                // Also skipped when this player has the per-player session bypass
-                // enabled from the individual-player menu.
-                BasisAvatarPerformanceLimits.Result perfResult =
-                    (BasisAvatarFactory.IsLoadingAvatar(BasisLoadableBundle) || BypassPerformanceLimits)
-                        ? BasisAvatarPerformanceLimits.Result.Pass
-                        : BasisAvatarPerformanceLimits.Evaluate(BasisLoadableBundle.BasisBundleConnector);
+                // Also skipped when this player has the per-player session bypass or
+                // Always Show Avatar enabled from the individual-player menu.
+                BasisAvatarPerformanceLimits.Result perfResult = EvaluatePerformanceGate(BasisLoadableBundle);
                 IsBlockedByPerformance = perfResult.Blocked;
                 PerformanceBlockReason = perfResult.Blocked ? perfResult.Reason : null;
 
@@ -703,9 +764,27 @@ namespace Basis.Scripts.BasisSdk.Players
                     BlockReason = perfResult.Reason,
                 };
 
-                if (BasisPlayerSettingsData.AvatarVisible && !effectivelyBlocked && !IsBlockedByPerformance && (InAvatarRange || AlwaysShowAvatar) && !HasFailedAvatarLoadGlobally)
+                if (BasisPlayerSettingsData.AvatarVisible && !effectivelyBlocked && !IsBlockedByPerformance && (InAvatarRange || AvatarAlwaysLoaded) && !HasFailedAvatarLoadGlobally)
                 {
                     await BasisAvatarFactory.LoadAvatarRemote(this, Mode, BasisLoadableBundle, Vector3.zero, Quaternion.identity);
+
+                    if (!IsDestroyed && !HasFailedAvatarLoadGlobally)
+                    {
+                        BasisAvatarPerformanceLimits.Result postLoadResult = EvaluatePerformanceGate(BasisLoadableBundle);
+                        if (postLoadResult.Blocked)
+                        {
+                            IsBlockedByPerformance = true;
+                            PerformanceBlockReason = postLoadResult.Reason;
+                            LastPerformanceInfo.Blocked = true;
+                            LastPerformanceInfo.BlockReason = postLoadResult.Reason;
+                            if (BasisAvatarFarLOD.HasRealConnector(BasisLoadableBundle))
+                            {
+                                BasisAvatarFarLOD.CaptureFarLodFallback(this, BasisLoadableBundle);
+                            }
+                            BasisAvatarFactory.RemoveOldAvatarAndLoadFallback(this, Vector3.zero, Quaternion.identity);
+                            BasisDebug.LogWarning($"{DisplayName} avatar blocked once its metadata arrived: {postLoadResult.Reason}", BasisDebug.LogTag.Avatar);
+                        }
+                    }
                 }
                 else
                 {
@@ -792,9 +871,15 @@ namespace Basis.Scripts.BasisSdk.Players
 
             if (_reloadQueuedDuringLoad)
             {
+                // Latest-wins: the queuing caller already ran the empty-bundle fixup and
+                // recorded its request into AlwaysRequested* before hitting the guard above.
                 _reloadQueuedDuringLoad = false;
-                await CreateAvatar(AlwaysRequestedMode, AlwaysRequestedAvatar);
-                return;
+                Mode = AlwaysRequestedMode;
+                BasisLoadableBundle = AlwaysRequestedAvatar;
+                IsLoadingAnAvatar = true;
+                continue;
+            }
+            break;
             }
 
             // Any terminal "pin to fallback" state must skip the range-based re-evaluation
@@ -802,7 +887,11 @@ namespace Basis.Scripts.BasisSdk.Players
             // correct state for these, but the check reads it as drift) and ReloadAvatar
             // recurses forever, hanging Unity. Applies to: block, global load failure,
             // performance block, and the user hiding the avatar via the per-player menu.
-            if (IsEffectivelyBlocked || HasFailedAvatarLoadGlobally || IsBlockedByPerformance || !BasisPlayerSettingsData.AvatarVisible)
+            // Destroyed is terminal too: a disconnect mid-download cancels the load
+            // (swallowed as an OCE, so no failure latch) and every later LoadAvatarRemote
+            // early-outs synchronously — the mismatch tail then mutually recursed with
+            // ReloadAvatar with no yield until the stack overflowed (2026-09-02 dump).
+            if (IsDestroyed || IsEffectivelyBlocked || HasFailedAvatarLoadGlobally || IsBlockedByPerformance || !BasisPlayerSettingsData.AvatarVisible)
             {
                 return;
             }
@@ -811,7 +900,7 @@ namespace Basis.Scripts.BasisSdk.Players
             // Otherwise set cooldown to prevent oscillation. A pending far install keeps the
             // real avatar up on purpose — the transmit tick owns that swap; re-running here
             // would churn CreateAvatar every pass until the tick wins.
-            bool effectiveInRange = InAvatarRange || AlwaysShowAvatar;
+            bool effectiveInRange = InAvatarRange || AvatarAlwaysLoaded;
             bool stateMismatch = (effectiveInRange && IsConsideredFallBackAvatar) || (!effectiveInRange && !IsConsideredFallBackAvatar);
             if (stateMismatch && !farInstallPending)
             {
@@ -894,6 +983,13 @@ namespace Basis.Scripts.BasisSdk.Players
         /// </param>
         public void ChangeMeshLOD(short grid)
         {
+            CurrentMeshLodLevel = grid;
+            ForceMeshLod(grid);
+            BasisAvatarSkinLOD.Apply(this, grid);
+            BasisAvatarShadowLOD.Apply(this, grid);
+        }
+        public void ForceMeshLod(short grid)
+        {
             if (BasisAvatar != null && BasisAvatar.Renders != null)
             {
                 int length = BasisAvatar.Renders.Length;
@@ -906,9 +1002,6 @@ namespace Basis.Scripts.BasisSdk.Players
                     }
                 }
             }
-
-            BasisAvatarSkinLOD.Apply(this, grid);
-            BasisAvatarShadowLOD.Apply(this, grid);
         }
 
         #endregion

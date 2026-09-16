@@ -1,5 +1,7 @@
 #if !BASIS_DISABLE_MICROPHONE
+using Basis.BasisUI;
 using Basis.Scripts.Audio;
+using Basis.Scripts.Device_Management;
 using Basis.Scripts.Networking;
 using Basis.Scripts.Networking.Transmitters;
 using UnityEngine;
@@ -24,6 +26,49 @@ namespace Basis.Scripts.Drivers
         public Sprite SpriteMicrophoneOn;
         public Sprite SpriteMicrophoneOff;
 
+        // --- Level ring (shader-drawn circle outline, swapped in for the sprite) ---
+        /// <summary>Replaces the microphone glyph with an outline-only circle that grows with voice level.</summary>
+        public bool UseLevelRing;
+
+        /// <summary>Ring quad edge length, as a multiple of the microphone sprite's longest side.</summary>
+        public float LevelRingSizeMultiplier = 0.875f;
+
+        /// <summary>Radius at silence, in quad half-extents. Under the stroke, so it closes to a dot.</summary>
+        [Range(0f, 1f)]
+        public float LevelRingQuietRadius = 0.05f;
+
+        /// <summary>Ring radius at 0 dBFS, in quad half-extents. Plus the stroke it must stay under 1.</summary>
+        [Range(0f, 1f)]
+        public float LevelRingLoudRadius = 0.88f;
+
+        /// <summary>Radius held while muted, in quad half-extents. Mute is a state, not a level.</summary>
+        [Range(0f, 1f)]
+        public float LevelRingMutedRadius = 0.45f;
+
+        /// <summary>Stroke half-width, in quad half-extents.</summary>
+        [Range(0.002f, 0.3f)]
+        public float LevelRingThickness = 0.06f;
+
+        /// <summary>
+        /// Multiplier on the shared voice envelope's attack and release rate. The ring is read at a
+        /// glance rather than watched like a meter, so it wants to be quicker off the mark than the
+        /// settings-panel meter that shares those constants.
+        /// </summary>
+        [Range(0.25f, 8f)]
+        public float LevelRingResponse = 2f;
+
+        private static readonly int LevelRingLevelId = Shader.PropertyToID("_Level");
+        private static readonly int LevelRingQuietId = Shader.PropertyToID("_RadiusQuiet");
+        private static readonly int LevelRingLoudId = Shader.PropertyToID("_RadiusLoud");
+        private static readonly int LevelRingMutedRadiusId = Shader.PropertyToID("_RadiusMuted");
+        private static readonly int LevelRingThicknessId = Shader.PropertyToID("_Thickness");
+        private static readonly int LevelRingMutedId = Shader.PropertyToID("_Muted");
+
+        private Material levelRingMaterial;
+        private Sprite levelRingSprite;
+        private Material spriteIconMaterial;
+        private float levelRingRms;
+
         public Vector2 VRdesiredNormXY = new Vector2(-0.42f, -0.52f);
 
         [Range(0f, 0.2f)]
@@ -39,13 +84,18 @@ namespace Basis.Scripts.Drivers
         // --- State ---
         public bool LocalIsTransmitting;
         public bool IsCurrentlyMuted { get; private set; }
+        public bool IsServerMuted { get; private set; }
+        private bool ShowsMuted => IsCurrentlyMuted || IsServerMuted;
 
         // Colors
         public Color UnMutedMutedIconColorActive = Color.white;
         public Color UnMutedMutedIconColorInactive = Color.grey;
         public Color MutedColor = Color.grey;
-        public Color ShoutColorActive = new Color(1f, 0.5490196f, 0f, 1f);
-        public Color ShoutColorInactive = new Color(0.6f, 0.3294118f, 0f, 1f);
+        public Color ServerMutedColor = Color.red;
+        public Color AnnounceColorActive = new Color(1f, 0.5490196f, 0f, 1f);
+        public Color AnnounceColorInactive = new Color(0.6f, 0.3294118f, 0f, 1f);
+        public Color ShoutColorActive = new Color(1f, 0.8117647f, 0.1607843f, 1f);
+        public Color ShoutColorInactive = new Color(0.6f, 0.4870588f, 0.0964706f, 1f);
         public Color PrivateColorActive = new Color(0.6078432f, 0.1882353f, 1f, 1f);
         public Color PrivateColorInactive = new Color(0.3647059f, 0.1129412f, 0.6f, 1f);
         public Color DirectColorActive = new Color(0.12156863f, 0.7490196f, 0.3529412f, 1f);
@@ -100,8 +150,20 @@ namespace Basis.Scripts.Drivers
                 SpriteRendererIconTransform = SpriteRendererIcon.transform;
                 StartingScale = SpriteRendererIconTransform.GetLocalScale();
                 largerScale = StartingScale * 1.2f;
+                if (spriteIconMaterial == null)
+                {
+                    // Once only: a re-Initialize while the ring is up would otherwise capture the
+                    // ring material as the sprite's, and the sprite style could never come back.
+                    spriteIconMaterial = SpriteRendererIcon.sharedMaterial;
+                }
             }
 
+            // Settings are broadcast per scene load, which can land either side of the microphone
+            // driver reporting itself ready, so read the binding here rather than wait for a change.
+            UseLevelRing = BasisSettingsDefaults.MicrophoneIconLevelRing.RawValue;
+            ApplyIconStyle();
+
+            IsServerMuted = BasisNetworkModeration.VoiceBlockedLocally;
             UpdateMicrophoneVisuals(BasisLocalMicrophoneDriver.isPaused, false);
 
             // Seed intents (no renderer writes here)
@@ -116,6 +178,119 @@ namespace Basis.Scripts.Drivers
             if (SpriteRendererIcon != null)
             {
                 SpriteRendererIcon.gameObject.SetActive(enabled);
+            }
+        }
+
+        // ---------------- Level Ring ----------------
+        public void OnLevelRingChanged(bool enabled)
+        {
+            if (UseLevelRing == enabled)
+            {
+                return;
+            }
+
+            UseLevelRing = enabled;
+            ApplyIconStyle();
+        }
+
+        /// <summary>
+        /// Points the icon renderer at either the microphone sprite or the ring quad. Both styles
+        /// share the one renderer, so placement, visibility, colour and sorting stay where they are.
+        /// </summary>
+        private void ApplyIconStyle()
+        {
+            if (SpriteRendererIcon == null)
+            {
+                return;
+            }
+
+            if (UseLevelRing && !TryBuildLevelRing())
+            {
+                // Nothing to draw the ring with: keep the sprite rather than blank the icon out.
+                UseLevelRing = false;
+            }
+
+            if (UseLevelRing)
+            {
+                SpriteRendererIcon.sharedMaterial = levelRingMaterial;
+                SpriteRendererIcon.sprite = levelRingSprite;
+                levelRingRms = 0f;
+                // The bounce scales the quad, which would thicken the stroke with it; the ring
+                // already animates on its own, so it stays at rest.
+                StopScaleBounce();
+            }
+            else
+            {
+                if (spriteIconMaterial != null)
+                {
+                    SpriteRendererIcon.sharedMaterial = spriteIconMaterial;
+                }
+                SpriteRendererIcon.sprite = ShowsMuted ? SpriteMicrophoneOff : SpriteMicrophoneOn;
+            }
+        }
+
+        private bool TryBuildLevelRing()
+        {
+            if (levelRingMaterial == null)
+            {
+                Material source = BasisDeviceManagement.Instance != null
+                    ? BasisDeviceManagement.Instance.MicrophoneLevelRingMaterial
+                    : null;
+                if (source == null)
+                {
+                    BasisDebug.LogError("Microphone level ring material is unassigned on BasisDeviceManagement; keeping the microphone sprite.");
+                    return false;
+                }
+
+                // Instantiated, because _Level is written every frame and the asset is shared.
+                levelRingMaterial = new Material(source) { name = "MicrophoneLevelRing", hideFlags = HideFlags.HideAndDontSave };
+            }
+
+            if (levelRingSprite == null)
+            {
+                // The microphone sprite's mesh is tight-fitted to the glyph, so a circle drawn over
+                // it would be cut to the microphone silhouette. Build a full-rect quad instead,
+                // sized off that sprite so the ring lands where the icon already sat.
+                Sprite source = SpriteMicrophoneOn != null ? SpriteMicrophoneOn : SpriteMicrophoneOff;
+                float side = source != null
+                    ? Mathf.Max(source.rect.width, source.rect.height) / Mathf.Max(1e-4f, source.pixelsPerUnit)
+                    : 1f;
+                side *= Mathf.Max(0.01f, LevelRingSizeMultiplier);
+
+                Texture2D white = Texture2D.whiteTexture;
+                levelRingSprite = Sprite.Create(white, new Rect(0f, 0f, white.width, white.height),
+                    new Vector2(0.5f, 0.5f), white.width / side, 0, SpriteMeshType.FullRect);
+                levelRingSprite.name = "MicrophoneLevelRing";
+                levelRingSprite.hideFlags = HideFlags.HideAndDontSave;
+            }
+
+            levelRingMaterial.SetFloat(LevelRingQuietId, LevelRingQuietRadius);
+            levelRingMaterial.SetFloat(LevelRingLoudId, LevelRingLoudRadius);
+            levelRingMaterial.SetFloat(LevelRingMutedRadiusId, LevelRingMutedRadius);
+            levelRingMaterial.SetFloat(LevelRingThicknessId, LevelRingThickness);
+            return true;
+        }
+
+        /// <summary>Releases the runtime ring material and quad. Safe to call when neither was built.</summary>
+        public void Dispose()
+        {
+            if (UseLevelRing)
+            {
+                // Hands the renderer back its sprite and material before the ring's are destroyed.
+                UseLevelRing = false;
+                ApplyIconStyle();
+            }
+
+            if (levelRingMaterial != null)
+            {
+                UnityEngine.Object.Destroy(levelRingMaterial);
+                levelRingMaterial = null;
+            }
+
+            if (levelRingSprite != null)
+            {
+                UnityEngine.Object.Destroy(levelRingSprite);
+                levelRingSprite = null;
             }
         }
 
@@ -203,13 +378,14 @@ namespace Basis.Scripts.Drivers
             IsCurrentlyMuted = IsMuted;
 
             // sprite change can stay here (you only asked to centralize color/scale/active)
-            if (SpriteRendererIcon != null)
+            // In ring mode the shader carries the mute state instead, applied in Simulate.
+            if (SpriteRendererIcon != null && !UseLevelRing)
             {
-                SpriteRendererIcon.sprite = IsMuted ? SpriteMicrophoneOff : SpriteMicrophoneOn;
+                SpriteRendererIcon.sprite = ShowsMuted ? SpriteMicrophoneOff : SpriteMicrophoneOn;
             }
 
             // request bounce + recompute intents (no renderer writes)
-            bounceRequested = true;
+            bounceRequested = !UseLevelRing;
             RecomputeVisibilityIntent();
             RecomputeColorIntent();
 
@@ -267,7 +443,7 @@ namespace Basis.Scripts.Drivers
 
                 case MicrophoneDisplayMode.ActivityDetection:
                     // Show when muted OR transmitting.
-                    requestedVisible = IsCurrentlyMuted || LocalIsTransmitting;
+                    requestedVisible = ShowsMuted || LocalIsTransmitting;
                     break;
 
                 default:
@@ -276,13 +452,30 @@ namespace Basis.Scripts.Drivers
             }
         }
 
-        public void OnShoutModeChanged()
+        public void OnAnnounceModeChanged()
         {
             RecomputeColorIntent();
         }
 
         public void OnTalkModeChanged()
         {
+            RecomputeColorIntent();
+        }
+
+        public void OnServerMuteChanged()
+        {
+            bool blocked = BasisNetworkModeration.VoiceBlockedLocally;
+            if (blocked == IsServerMuted)
+            {
+                return;
+            }
+            IsServerMuted = blocked;
+            if (SpriteRendererIcon != null && !UseLevelRing)
+            {
+                SpriteRendererIcon.sprite = ShowsMuted ? SpriteMicrophoneOff : SpriteMicrophoneOn;
+            }
+            bounceRequested = !UseLevelRing;
+            RecomputeVisibilityIntent();
             RecomputeColorIntent();
         }
 
@@ -300,14 +493,26 @@ namespace Basis.Scripts.Drivers
 
         private Color ComputeColorIntent()
         {
+            if (IsServerMuted)
+            {
+                return ServerMutedColor;
+            }
+
             if (IsCurrentlyMuted)
             {
                 return MutedColor;
             }
 
-            if (BasisAudioTransmission.IsInShoutMode)
+            // A local-only hold (the microphone test) blocks the send exactly like NoOne does,
+            // so it has to read the same on the HUD, the menu mute button and the range circle.
+            if (BasisTalkModeManager.LocalOnlyHeld)
             {
-                return LocalIsTransmitting ? ShoutColorActive : ShoutColorInactive;
+                return LocalIsTransmitting ? NoOneColorActive : NoOneColorInactive;
+            }
+
+            if (BasisAudioTransmission.IsInAnnounceMode)
+            {
+                return LocalIsTransmitting ? AnnounceColorActive : AnnounceColorInactive;
             }
 
             switch (BasisTalkModeManager.CurrentMode)
@@ -318,6 +523,8 @@ namespace Basis.Scripts.Drivers
                     return LocalIsTransmitting ? DirectColorActive : DirectColorInactive;
                 case BasisTalkMode.ThisPerson:
                     return LocalIsTransmitting ? ThisPersonColorActive : ThisPersonColorInactive;
+                case BasisTalkMode.Shout:
+                    return LocalIsTransmitting ? ShoutColorActive : ShoutColorInactive;
                 case BasisTalkMode.NoOne:
                     return LocalIsTransmitting ? NoOneColorActive : NoOneColorInactive;
                 default:
@@ -354,6 +561,20 @@ namespace Basis.Scripts.Drivers
 
             // --- Apply color ---
             SpriteRendererIcon.color = targetColor;
+
+            // --- Drive the ring radius from the outgoing voice level ---
+            if (UseLevelRing && levelRingMaterial != null)
+            {
+                // Followed in RMS space with the shared attack/release, then through the shared dBFS
+                // window, so the ring rides the same 0..1 loudness the volume meter and any avatar
+                // parameter already read -- linear amplitude would leave speech in the bottom fifth.
+                // Follow only ever uses deltaSeconds/tau, so scaling the delta divides both time
+                // constants by the same factor: the ring speeds up without moving the shared ones.
+                float target = ShowsMuted ? 0f : BasisVoiceLevel.LocalVoiceRms;
+                levelRingRms = BasisVoiceLevel.Follow(levelRingRms, target, DeltaTime * LevelRingResponse);
+                levelRingMaterial.SetFloat(LevelRingLevelId, BasisVoiceLevel.RmsToUnit(levelRingRms));
+                levelRingMaterial.SetFloat(LevelRingMutedId, ShowsMuted ? 1f : 0f);
+            }
 
             // --- Start bounce if requested ---
             if (bounceRequested)

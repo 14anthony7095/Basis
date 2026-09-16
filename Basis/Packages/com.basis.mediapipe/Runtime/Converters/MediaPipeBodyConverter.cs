@@ -1,116 +1,109 @@
-﻿using Basis.Scripts.Drivers;
 using UnityEngine;
-
 namespace Basis.MediaPipe
 {
-    /// <summary>
-    /// Torso lean/twist/roll from PoseLandmarker world landmarks. Rotation only — the world landmarks are
-    /// HIP-CENTRED, so they carry no global translation to read a sway out of even if we wanted one; a body
-    /// shift shows up as the shoulders moving over the hips, which is a lean, and is already captured here.
-    ///
-    /// Reads the same body frame the arms retarget against and reports how far it has turned from a calibrated
-    /// neutral. What comes out is an OFFSET, not a chest orientation — the caller composes it onto the avatar's
-    /// own body so the chest keeps following the body and only picks up your torso on top.
-    /// </summary>
     public sealed class MediaPipeBodyConverter
     {
-        /// <summary>Scales the whole torso offset. Below 1 keeps it as a suggestion of movement rather than a copy.</summary>
-        public float Strength = 0.6f;
-
-        /// <summary>Ceiling on each axis before Strength, so a bad frame cannot throw the torso somewhere a spine will not go.</summary>
-        public float MaxAngle = 35f;
-
-        public float Smoothing = 0.7f;
-        public bool InvertTwist = false;
-        public bool InvertLean = false;
-        public bool InvertRoll = false;
-
-        private const float CutoffResponsive = 6f;
-        private const float CutoffSmooth = 0.6f;
-        private const float Beta = 1.5f;
-        private const float DerivativeCutoff = 1f;
-
-
-
-        private Quaternion _neutralInverse = Quaternion.identity;
-        private bool _calibrated;
-        private BasisEuroQuatState _euro;
-        private Quaternion _sampled = Quaternion.identity;
-        private Quaternion _carried = Quaternion.identity;
-        private bool _hasSample;
-
-
+        public float Strength = 0.6f, MaxAngle = 35f, Smoothing = 0.7f, MaxShift = 0.35f, AssumedHorizontalFov = 65f;
+        public bool InvertTwist = false, InvertLean = false, InvertRoll = false, RejectGlitches = true;
+        private const float CutoffResponsive = 6f, CutoffSmooth = 0.6f, Beta = 1.5f, HoldSeconds = 0.5f, FadeInHz = 6f, FadeOutHz = 3f;
+        private Quaternion neutralInverse = Quaternion.identity;
+        private bool calibrated, shiftCalibrated;
+        private MediaPipeRotationFilter filter;
+        private MediaPipePositionFilter translation;
+        private MediaPipePresenceFade presence;
+        private Vector2 neutralCenter;
+        private float neutralWidth, neutralDistance;
+        public int RejectedSamples => filter.Rejected + translation.Rejected;
         private float Cutoff => Mathf.Lerp(CutoffResponsive, CutoffSmooth, Mathf.Clamp01(Smoothing));
-
         public void Calibrate(in BasisMediaPipeResult result)
         {
             if (TryTorsoRotation(result, out Quaternion rot))
             {
-                _neutralInverse = Quaternion.Inverse(rot);
-                _calibrated = true;
+                neutralInverse = Quaternion.Inverse(rot);
+                calibrated = true;
+                filter.Reset();
             }
+            shiftCalibrated = false;
+            translation.Reset();
         }
-
         public void Reset()
         {
-            _calibrated = false;
-            _euro = default;
-            _hasSample = false;
-            _sampled = Quaternion.identity;
-            _carried = Quaternion.identity;
-
+            calibrated = false;
+            shiftCalibrated = false;
+            filter.Reset();
+            translation.Reset();
+            presence.Reset();
         }
-
-
-        /// <summary>Torso lean/twist/roll relative to the calibrated neutral, in the avatar's body axes.</summary>
-        public bool TryGetTorsoOffset(in BasisMediaPipeResult result, in MediaPipeTiming timing, out Quaternion offset)
+        public bool TryGetTorsoOffset(in BasisMediaPipeResult result, in MediaPipeTiming timing, out Quaternion offset, out Vector3 shift)
         {
             offset = Quaternion.identity;
-            if (!TryTorsoRotation(result, out Quaternion rot)) return false;
-
-            if (!_calibrated)
+            shift = Vector3.zero;
+            bool present = TryTorsoRotation(result, out Quaternion rot);
+            float weight = presence.Step(present, timing.RenderDelta, HoldSeconds, FadeInHz, FadeOutHz);
+            if (weight <= 0f)
             {
-                _neutralInverse = Quaternion.Inverse(rot);
-                _calibrated = true;
+                filter.Reset();
+                translation.Reset();
+                return false;
             }
-
-            Vector3 euler = (_neutralInverse * rot).eulerAngles;
-            float lean = Axis(euler.x, InvertLean);
-            float twist = Axis(euler.y, InvertTwist);
-            // Roll is the side-lean, and it used to be dropped on the floor. For someone sitting at a webcam it is
-            // the most visible thing their torso does — you sway sideways far more than you twist.
-            float roll = Axis(euler.z, InvertRoll);
-
-            Quaternion target = Quaternion.Euler(lean, twist, roll);
-
-            // Same two-clock split the arms use: one-euro on the camera's delta when a fresh sample lands, then a
-            // carry slerp every rendered frame. A filter run at render rate over a held sample snaps and holds.
-            if (timing.IsNewSample || !_hasSample)
+            Quaternion relative;
+            Vector3 moved;
+            if (present)
             {
-                _sampled = BasisFilterMath.EuroQuat(ref _euro, target, timing.SampleDelta,
-                    Cutoff, Beta, DerivativeCutoff);
-                if (!_hasSample)
+                if (!calibrated)
                 {
-                    _carried = _sampled;
-                    _hasSample = true;
-                    offset = _carried;
-                    return true;
+                    neutralInverse = Quaternion.Inverse(rot);
+                    calibrated = true;
                 }
+                float cutoff = timing.Scaled(Cutoff);
+                relative = filter.Apply(neutralInverse * rot, in timing, cutoff, Beta, RejectGlitches ? MediaPipeFilterMath.MaxTurnDegPerSec : 0f);
+                moved = TryMeasureShift(in result, out Vector3 measured) ? translation.Apply(measured, in timing, cutoff, Beta, 1f, RejectGlitches ? MediaPipeFilterMath.MaxTorsoSpeed : 0f) : translation.Carry(in timing);
             }
-
-            _carried = Quaternion.Slerp(_carried, _sampled,
-                BasisFilterMath.Alpha(timing.CarryCutoff, timing.RenderDelta));
-            offset = _carried;
+            else
+            {
+                relative = filter.Carry(in timing);
+                moved = translation.Carry(in timing);
+            }
+            Vector3 euler = relative.eulerAngles;
+            Quaternion target = Quaternion.Euler(Axis(euler.x, InvertLean), Axis(euler.y, InvertTwist), Axis(euler.z, InvertRoll));
+            offset = Quaternion.Slerp(Quaternion.identity, target, weight);
+            shift = Vector3.ClampMagnitude(moved, MaxShift) * (Strength * weight);
             return true;
         }
-
+        // Shoulder centre and shoulder width in the image, against the neutral captured at calibration. Lateral and
+        // vertical movement come from the centre, scaled by the metric shoulder width; depth comes from how much
+        // the shoulders shrink, against a distance estimated from an assumed webcam field of view. A shrug lifts
+        // the shoulder centre and so lifts the chest, which is exactly what a shrug looks like.
+        private bool TryMeasureShift(in BasisMediaPipeResult result, out Vector3 shift)
+        {
+            shift = Vector3.zero;
+            Vector3[] image = result.PoseLandmarks, world = result.PoseWorldLandmarks;
+            if (image == null || world == null || image.Length < MediaPipeSpace.PoseCount || world.Length < MediaPipeSpace.PoseCount) return false;
+            float aspect = float.IsFinite(result.ImageAspect) && result.ImageAspect > 0f ? result.ImageAspect : 1f;
+            Vector3 li = image[MediaPipeSpace.LeftShoulder], ri = image[MediaPipeSpace.RightShoulder];
+            if (!MediaPipeSpace.IsFinite(li) || !MediaPipeSpace.IsFinite(ri) || !MediaPipeSpace.IsFinite(world[MediaPipeSpace.LeftShoulder]) || !MediaPipeSpace.IsFinite(world[MediaPipeSpace.RightShoulder])) return false;
+            Vector2 l = new Vector2(li.x * aspect, li.y), r = new Vector2(ri.x * aspect, ri.y), center = (l + r) * 0.5f;
+            float width = Vector2.Distance(l, r), metric = Vector3.Distance(world[MediaPipeSpace.LeftShoulder], world[MediaPipeSpace.RightShoulder]);
+            if (!(width > 0.02f) || !(metric > 0.05f)) return false;
+            if (!shiftCalibrated)
+            {
+                neutralCenter = center;
+                neutralWidth = width;
+                neutralDistance = metric / (2f * Mathf.Tan(AssumedHorizontalFov * 0.5f * Mathf.Deg2Rad) * (width / aspect));
+                shiftCalibrated = true;
+                return true;
+            }
+            Vector2 d = (center - neutralCenter) * (metric / width);
+            float depth = neutralDistance * (neutralWidth / width - 1f);
+            shift = new Vector3(-d.x, d.y, -depth);
+            return MediaPipeSpace.IsFinite(shift);
+        }
         private float Axis(float raw, bool invert)
         {
             float angle = raw > 180f ? raw - 360f : raw;
             angle = Mathf.Clamp(angle, -MaxAngle, MaxAngle);
             return angle * (invert ? -1f : 1f) * Strength;
         }
-
         private static bool TryTorsoRotation(in BasisMediaPipeResult result, out Quaternion rot)
         {
             rot = Quaternion.identity;

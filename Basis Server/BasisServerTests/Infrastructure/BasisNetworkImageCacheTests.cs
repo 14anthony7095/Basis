@@ -1,6 +1,8 @@
 using Basis.Network.Core;
 using Basis.Network.Server.Generic;
 using BasisNetworkCore;
+using BasisNetworkServer.Security;
+using BasisPermissions;
 using System.Net;
 using System.Text;
 using Xunit;
@@ -63,6 +65,7 @@ public class BasisNetworkImageCacheTests : IDisposable
 
     private const byte OpSpawn = 1;
     private const byte OpChunk = 2;
+    private const byte OpTransform = 3;
     private const byte OpDespawn = 4;
     private const byte OpAnimationSpawn = 6;
     private const byte OpAnimationChunk = 7;
@@ -175,6 +178,63 @@ public class BasisNetworkImageCacheTests : IDisposable
         writer.Write(new byte[payloadBytes]);
         writer.Flush();
         return stream.ToArray();
+    }
+
+    private static byte[] EncodeTransform(
+        Guid id,
+        float positionX,
+        float positionY,
+        float positionZ,
+        float rotationX = 0f,
+        float rotationY = 0f,
+        float rotationZ = 0f,
+        float rotationW = 1f,
+        float scale = 1f
+    )
+    {
+        using MemoryStream stream = new MemoryStream();
+        using BinaryWriter writer = new BinaryWriter(stream, Encoding.UTF8);
+        writer.Write(OpTransform);
+        writer.Write(id.ToByteArray());
+        writer.Write(positionX);
+        writer.Write(positionY);
+        writer.Write(positionZ);
+        writer.Write(rotationX);
+        writer.Write(rotationY);
+        writer.Write(rotationZ);
+        writer.Write(rotationW);
+        writer.Write(scale);
+        writer.Flush();
+        return stream.ToArray();
+    }
+
+    /// <summary>
+    /// Walks a spawn header or an offer the way the client does, so the pose is read past the
+    /// variable-length owner name rather than from an offset this fixture assumes. Position and
+    /// rotation together, because a picture on a wall is turned as well as placed and the two are
+    /// one seven-float block that the cache either carries across or does not.
+    /// </summary>
+    private static (float X, float Y, float Z, float RX, float RY, float RZ, float RW) ReadSpawnPose(byte[] header)
+    {
+        using MemoryStream stream = new MemoryStream(header, false);
+        using BinaryReader reader = new BinaryReader(stream, Encoding.UTF8);
+        reader.ReadByte();
+        reader.ReadBytes(16);
+        reader.ReadUInt16();
+        reader.ReadString();
+        reader.ReadInt32();
+        reader.ReadInt32();
+        reader.ReadInt32();
+        reader.ReadInt32();
+        return (
+            reader.ReadSingle(),
+            reader.ReadSingle(),
+            reader.ReadSingle(),
+            reader.ReadSingle(),
+            reader.ReadSingle(),
+            reader.ReadSingle(),
+            reader.ReadSingle()
+        );
     }
 
     private static byte[] EncodeAnimationSpawn(Guid id, int totalChunks)
@@ -671,6 +731,248 @@ public class BasisNetworkImageCacheTests : IDisposable
         Assert.True(owner.Sent.Count > afterFirstShare);
     }
 
+    // ---- GIF lock ------------------------------------------------------------------------------
+
+    private static Guid ShareAnimatedImage(ushort owner, int chunks = 2, int animationChunks = 2)
+    {
+        Guid id = ShareImage(owner, chunks);
+        Observe(owner, EncodeAnimationSpawn(id, animationChunks));
+        for (int index = 0; index < animationChunks; index++)
+        {
+            Observe(owner, EncodeChunk(id, index, ChunkBytes, OpAnimationChunk));
+        }
+        return id;
+    }
+
+    private static int CountOpcode(ImageCacheRecordingPeer peer, byte opcode) =>
+        peer.Sent.Count(sent => PayloadOpcode(sent) == opcode);
+
+    [Fact]
+    public void IsAnimationPayload_MatchesOnlyTheAnimationOpcodes()
+    {
+        Assert.True(BasisNetworkImageCache.IsAnimationPayload(new byte[] { OpAnimationSpawn, 0 }, 2));
+        Assert.True(BasisNetworkImageCache.IsAnimationPayload(new byte[] { OpAnimationChunk }, 1));
+        Assert.False(BasisNetworkImageCache.IsAnimationPayload(new byte[] { OpSpawn }, 1));
+        Assert.False(BasisNetworkImageCache.IsAnimationPayload(new byte[] { OpChunk }, 1));
+        Assert.False(BasisNetworkImageCache.IsAnimationPayload(new byte[] { OpTransform }, 1));
+        Assert.False(BasisNetworkImageCache.IsAnimationPayload(new byte[] { OpAnimationChunk }, 0));
+        Assert.False(BasisNetworkImageCache.IsAnimationPayload(null, 0));
+    }
+
+    [Fact]
+    public void IsGifBlockedForUuid_BlocksOnlyLockedUsersWithoutTheGlobalLockNode()
+    {
+        PermissionManager manager = PermissionManager.PermissionIntegration.Manager;
+        string plainUuid = $"gif-plain-{Guid.NewGuid():N}";
+        string bypassUuid = $"gif-bypass-{Guid.NewGuid():N}";
+        bool wasLocked = BasisGlobalLockManager.GifsLocked;
+        if (wasLocked)
+        {
+            BasisGlobalLockManager.ToggleGifs();
+        }
+
+        try
+        {
+            manager.AddUserNode(bypassUuid, PermNodes.ModerationGlobalLock);
+
+            Assert.False(BasisNetworkImageCache.IsGifBlockedForUuid(plainUuid));
+            Assert.False(BasisNetworkImageCache.IsGifBlockedForUuid(bypassUuid));
+
+            Assert.True(BasisGlobalLockManager.ToggleGifs());
+            Assert.True(BasisNetworkImageCache.IsGifBlockedForUuid(plainUuid));
+            Assert.True(BasisNetworkImageCache.IsGifBlockedForUuid(null));
+            Assert.False(BasisNetworkImageCache.IsGifBlockedForUuid(bypassUuid));
+        }
+        finally
+        {
+            manager.RemoveUserNode(bypassUuid, PermNodes.ModerationGlobalLock);
+            if (BasisGlobalLockManager.GifsLocked != wasLocked)
+            {
+                BasisGlobalLockManager.ToggleGifs();
+            }
+        }
+    }
+
+    [Fact]
+    public void WhileGifsAreLocked_ARequesterGetsTheStillAndTheAnimationFollowsOnUnlock()
+    {
+        Guid id = ShareAnimatedImage(owner: 7);
+        ImageCacheRecordingPeer joiner = RegisterPeer(9);
+        bool wasLocked = BasisGlobalLockManager.GifsLocked;
+        if (!wasLocked)
+        {
+            BasisGlobalLockManager.ToggleGifs();
+        }
+
+        try
+        {
+            BasisNetworkImageCache.ServeRequestedImage(9, id);
+            Assert.Equal(1, CountOpcode(joiner, OpSpawn));
+            Assert.Equal(2, CountOpcode(joiner, OpChunk));
+            Assert.Equal(0, CountOpcode(joiner, OpAnimationSpawn));
+            Assert.Equal(0, CountOpcode(joiner, OpAnimationChunk));
+
+            BasisNetworkImageCache.ResumeAnimationsAfterUnlock();
+            Assert.Equal(0, CountOpcode(joiner, OpAnimationSpawn));
+        }
+        finally
+        {
+            if (BasisGlobalLockManager.GifsLocked)
+            {
+                BasisGlobalLockManager.ToggleGifs();
+            }
+        }
+
+        BasisNetworkImageCache.ResumeAnimationsAfterUnlock();
+        Assert.Equal(1, CountOpcode(joiner, OpAnimationSpawn));
+        Assert.Equal(2, CountOpcode(joiner, OpAnimationChunk));
+
+        joiner.Sent.Clear();
+        BasisNetworkImageCache.ResumeAnimationsAfterUnlock();
+        Assert.Empty(joiner.Sent);
+
+        if (wasLocked)
+        {
+            BasisGlobalLockManager.ToggleGifs();
+        }
+    }
+
+    [Fact]
+    public void ARequesterServedBeforeTheAnimationFinished_IsSentItWhenItCompletes()
+    {
+        Guid id = ShareImage(owner: 7, chunks: 2);
+        Observe(7, EncodeAnimationSpawn(id, 2));
+        Observe(7, EncodeChunk(id, 0, ChunkBytes, OpAnimationChunk));
+
+        ImageCacheRecordingPeer joiner = RegisterPeer(9);
+        BasisNetworkImageCache.ServeRequestedImage(9, id);
+        Assert.Equal(1, CountOpcode(joiner, OpSpawn));
+        Assert.Equal(0, CountOpcode(joiner, OpAnimationSpawn));
+
+        Observe(7, EncodeChunk(id, 1, ChunkBytes, OpAnimationChunk));
+
+        Assert.Equal(1, CountOpcode(joiner, OpAnimationSpawn));
+        Assert.Equal(2, CountOpcode(joiner, OpAnimationChunk));
+    }
+
+    [Fact]
+    public void ThePeersTheSharerSentTheAnimationTo_AreNotSentItAgainByTheCache()
+    {
+        ImageCacheRecordingPeer nearby = RegisterPeer(9);
+
+        Guid id = Guid.NewGuid();
+        ushort[] targeted = { 9 };
+        ObserveTargeted(7, EncodeSpawn(id, 7, "Sharer", totalChunks: 1), targeted);
+        ObserveTargeted(7, EncodeChunk(id, 0, ChunkBytes), targeted);
+        ObserveTargeted(7, EncodeAnimationSpawn(id, 1), targeted);
+        ObserveTargeted(7, EncodeChunk(id, 0, ChunkBytes, OpAnimationChunk), targeted);
+
+        Assert.Equal(0, CountOpcode(nearby, OpAnimationSpawn));
+        BasisNetworkImageCache.ResumeAnimationsAfterUnlock();
+        Assert.Equal(0, CountOpcode(nearby, OpAnimationSpawn));
+    }
+
+    // ---- where the picture actually is -------------------------------------------------------
+
+    /// <summary>
+    /// A spawn header says where a picture was hung, and pictures get carried around. The offer is
+    /// the only thing a joiner measures its distance against, so a stale one both draws the card in
+    /// the wrong place and can decide a picture propped against the joiner is too far away to want.
+    /// </summary>
+    [Fact]
+    public void AnOfferCarriesWhereTheImageIsNow_NotWhereItWasSpawned()
+    {
+        // Turned as well as moved: a picture hung flat on one wall and re-hung on the wall opposite
+        // is at a new position AND a new facing, and the two travel as one block.
+        Guid id = ShareImage(owner: 7, chunks: 2, positionX: 12.5f, positionZ: -3f);
+        Observe(7, EncodeTransform(id, 1f, 2f, 3f, rotationY: 0.7071f, rotationW: 0.7071f));
+
+        ImageCacheRecordingPeer joiner = RegisterPeer(9);
+        BasisNetworkImageCache.OfferCachedImagesToPeer(joiner);
+
+        Assert.Equal((1f, 2f, 3f, 0f, 0.7071f, 0f, 0.7071f), ReadSpawnPose(PayloadOf(joiner.Sent[0])));
+    }
+
+    /// <summary>
+    /// Control of a card passes to whoever picks it up, so the player who moved a picture is very
+    /// often not the player who shared it. Following only the owner would leave every borrowed card
+    /// frozen where it was put down.
+    /// </summary>
+    [Fact]
+    public void ATransformFromWhoeverPickedTheImageUp_IsFollowed()
+    {
+        Guid id = ShareImage(owner: 7, chunks: 2);
+        Observe(11, EncodeTransform(id, 4f, 5f, 6f, rotationX: 0.5f, rotationW: 0.5f));
+
+        ImageCacheRecordingPeer joiner = RegisterPeer(9);
+        BasisNetworkImageCache.OfferCachedImagesToPeer(joiner);
+
+        Assert.Equal((4f, 5f, 6f, 0.5f, 0f, 0f, 0.5f), ReadSpawnPose(PayloadOf(joiner.Sent[0])));
+    }
+
+    [Fact]
+    public void RequestingAnImageThatMoved_ReplaysThePoseAheadOfTheChunks()
+    {
+        // Ahead of the chunks because the receiver raises its card off the header: a transform
+        // arriving after the last chunk would leave the card loading in the wrong place, and the
+        // transform is also the only payload carrying scale.
+        Guid id = ShareImage(owner: 7, chunks: 3);
+        byte[] moved = EncodeTransform(id, 1f, 2f, 3f, rotationZ: 0.3827f, rotationW: 0.9239f, scale: 2.5f);
+        Observe(7, moved);
+
+        ImageCacheRecordingPeer joiner = RegisterPeer(9);
+        BasisNetworkImageCache.OfferCachedImagesToPeer(joiner);
+        joiner.Sent.Clear();
+
+        BasisNetworkImageCache.ServeRequestedImage(9, id);
+
+        Assert.Equal(5, joiner.Sent.Count);
+        Assert.Equal(OpSpawn, PayloadOpcode(joiner.Sent[0]));
+        Assert.Equal((1f, 2f, 3f, 0f, 0f, 0.3827f, 0.9239f), ReadSpawnPose(PayloadOf(joiner.Sent[0])));
+        Assert.Equal(moved, PayloadOf(joiner.Sent[1]));
+        Assert.All(joiner.Sent.Skip(2), sent => Assert.Equal(OpChunk, PayloadOpcode(sent)));
+    }
+
+    [Fact]
+    public void RepeatedTransforms_AreChargedOnce()
+    {
+        // A card being dragged across a room sends one of these several times a second; each has to
+        // overwrite the last rather than accumulate, or moving a picture slowly evicts the room.
+        Guid id = ShareImage(owner: 7, chunks: 2);
+        long beforeAnyPose = BasisNetworkImageCache.TotalBytes;
+
+        Observe(7, EncodeTransform(id, 1f, 0f, 0f));
+        long afterFirstPose = BasisNetworkImageCache.TotalBytes;
+        for (int step = 0; step < 32; step++)
+        {
+            Observe(7, EncodeTransform(id, step, 0f, 0f));
+        }
+
+        Assert.True(afterFirstPose > beforeAnyPose);
+        Assert.Equal(afterFirstPose, BasisNetworkImageCache.TotalBytes);
+    }
+
+    [Fact]
+    public void ATransformOfTheWrongLength_LeavesThePoseAlone()
+    {
+        Guid id = ShareImage(owner: 7, chunks: 2, positionX: 12.5f);
+        Observe(7, EncodeTransform(id, 1f, 2f, 3f, rotationW: 0.5f).AsSpan(0, 30).ToArray());
+
+        ImageCacheRecordingPeer joiner = RegisterPeer(9);
+        BasisNetworkImageCache.OfferCachedImagesToPeer(joiner);
+
+        Assert.Equal((12.5f, 0f, 0f, 0f, 0f, 0f, 0f), ReadSpawnPose(PayloadOf(joiner.Sent[0])));
+    }
+
+    [Fact]
+    public void ATransformForAnImageTheCacheDoesNotHold_IsIgnored()
+    {
+        Observe(7, EncodeTransform(Guid.NewGuid(), 1f, 2f, 3f));
+
+        Assert.Equal(0, BasisNetworkImageCache.Count);
+        Assert.Equal(0, BasisNetworkImageCache.TotalBytes);
+    }
+
     // ---- malformed input --------------------------------------------------------------------
 
     [Fact]
@@ -679,6 +981,8 @@ public class BasisNetworkImageCacheTests : IDisposable
         Observe(7, new byte[0]);
         Observe(7, new byte[] { OpSpawn });
         Observe(7, new byte[] { OpChunk, 1, 2, 3 });
+
+        Observe(7, new byte[] { OpTransform, 1, 2, 3 });
 
         byte[] truncatedSpawn = EncodeSpawn(Guid.NewGuid(), 7, "Sharer", totalChunks: 2);
         Observe(7, truncatedSpawn.AsSpan(0, 20).ToArray());

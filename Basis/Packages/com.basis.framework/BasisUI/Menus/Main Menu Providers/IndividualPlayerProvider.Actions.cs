@@ -28,6 +28,7 @@ namespace Basis.BasisUI
             public Action Highlight;
             public Action TalkModes;
             public Action DirectConnection;
+            public Action Announce;
             public Action Shout;
             public Action EyeHeight;
         }
@@ -185,8 +186,8 @@ namespace Basis.BasisUI
         }
 
         // Tiles are title-only, so they need width for the longest label ("Remove from Private
-        // Chat", "Request Direct Connection") rather than height. Flexible constraint means the
-        // grid reflows to one column on a narrow panel instead of clipping.
+        // Chat") rather than height. Flexible constraint means the grid reflows to one column on
+        // a narrow panel instead of clipping.
         private static readonly Vector2 ActionTileSize = new Vector2(320f, 64f);
 
         /// <summary>
@@ -276,35 +277,8 @@ namespace Basis.BasisUI
                 sync.Volume?.Invoke(await BasisPlayerSettingsManager.RequestPlayerSettings(player.UUID));
             };
 
-            // ---- Direct connection ----
             bool hasNetTarget = BasisNetworkPlayers.PlayerToNetworkedPlayer(player, out BasisNetworkPlayer netTarget);
             ushort netPlayerId = hasNetTarget ? netTarget.playerId : (ushort)0;
-
-            PanelButton directConnBtn = NewAction("menu.individualPlayer.directConnection.description");
-            void PaintDirectConn()
-            {
-                if (directConnBtn == null || directConnBtn.Descriptor == null) return;
-                P2PState state = BasisP2PManager.GetSessionState(netPlayerId);
-                string key;
-                if (DirectConnectionBlocked(state))
-                {
-                    key = "menu.individualPlayer.directConnection.disabled";
-                }
-                else
-                {
-                    key = state == P2PState.Idle || state == P2PState.Failed
-                        ? "menu.individualPlayer.directConnection.request"
-                        : "menu.individualPlayer.directConnection.cancel";
-                }
-                directConnBtn.Descriptor.SetTitle(BasisLocalization.Get(key));
-            }
-            PaintDirectConn();
-            sync.DirectConnection += PaintDirectConn;
-            directConnBtn.OnClicked += () =>
-            {
-                ToggleDirectConnection(player);
-                sync.DirectConnection?.Invoke();
-            };
 
             // ---- Pin ----
             string uuid = player.UUID;
@@ -413,8 +387,88 @@ namespace Basis.BasisUI
                 sync.AvatarVisible?.Invoke(await ToggleAvatarVisible(player));
             };
 
+            // ---- Announce mode (admin only, same gate the Admin tab uses) ----
+            if (hasNetTarget && BasisTalkModeManager.LocalCanAnnounce())
+            {
+                PanelButton announceBtn = NewAction("menu.individualPlayer.announce.description");
+                void PaintAnnounce()
+                {
+                    if (announceBtn == null || announceBtn.Descriptor == null) return;
+                    announceBtn.Descriptor.SetTitle(BasisLocalization.Get(
+                        BasisAnnounceAudioDriver.IsInAnnounceMode(netPlayerId)
+                            ? "menu.individualPlayer.announce.disable"
+                            : "menu.individualPlayer.announce.enable"));
+                }
+                PaintAnnounce();
+                sync.Announce += PaintAnnounce;
+                // No repaint here — announce is a server round trip, so RunAction repaints from
+                // BasisNetworkModeration.OnAnnounceModeChanged once the change actually lands.
+                announceBtn.OnClicked += () =>
+                {
+                    if (BasisAnnounceAudioDriver.IsInAnnounceMode(netPlayerId))
+                        BasisNetworkModeration.DisableAnnounceMode(netPlayerId);
+                    else
+                        BasisNetworkModeration.EnableAnnounceMode(netPlayerId);
+                };
+            }
+
+            // ---- Shout mode (admin only, same gate the Admin tab uses) ----
+            if (hasNetTarget && BasisTalkModeManager.LocalCanShout())
+            {
+                PanelButton shoutBtn = NewAction("menu.individualPlayer.shout.description");
+                void PaintShout()
+                {
+                    if (shoutBtn == null || shoutBtn.Descriptor == null) return;
+                    shoutBtn.Descriptor.SetTitle(BasisLocalization.Get(
+                        BasisNetworkModeration.IsInShoutMode(netPlayerId)
+                            ? "menu.individualPlayer.shout.disable"
+                            : "menu.individualPlayer.shout.enable"));
+                }
+                PaintShout();
+                sync.Shout += PaintShout;
+                // Same server round trip as announce, so the repaint comes from
+                // BasisNetworkModeration.OnShoutModeChanged once the grant lands.
+                shoutBtn.OnClicked += () =>
+                {
+                    if (BasisNetworkModeration.IsInShoutMode(netPlayerId))
+                        BasisNetworkModeration.DisableShoutMode(netPlayerId);
+                    else
+                        BasisNetworkModeration.EnableShoutMode(netPlayerId);
+                };
+            }
+
+            // Toggles sit under the tile grid rather than in it: a toggle row is a title, a
+            // description and the switch laid out across the full panel width, and a 320-wide
+            // grid cell clips the title to fit.
+            RectTransform rows = group.ContentParent;
+
+            // ---- Direct connection ----
+            PanelToggle directConnToggle = PanelToggle.CreateNewEntry(rows);
+            directConnToggle.Descriptor.SetTitle(BasisLocalization.Get("menu.individualPlayer.directConnection"));
+            directConnToggle.Descriptor.SetTooltip(BasisLocalization.Get("menu.individualPlayer.directConnection.description"));
+            void PaintDirectConn()
+            {
+                if (directConnToggle == null || directConnToggle.Descriptor == null) return;
+                P2PState state = BasisP2PManager.GetSessionState(netPlayerId);
+                bool live = state != P2PState.Idle && state != P2PState.Failed;
+                // Every paint reads the live session, so a link that drops, a request that is
+                // refused and a cancelled confirmation all put the switch back to off by itself.
+                directConnToggle.SetValueWithoutNotify(live);
+                directConnToggle.Descriptor.SetDescription(
+                    !live && DirectConnectionBlocked(state)
+                        ? BasisLocalization.Get("menu.individualPlayer.directConnection.disabled")
+                        : string.Empty);
+            }
+            PaintDirectConn();
+            sync.DirectConnection += PaintDirectConn;
+            directConnToggle.OnValueChanged += _ =>
+            {
+                ToggleDirectConnection(player);
+                sync.DirectConnection?.Invoke();
+            };
+
             // ---- Jiggle grabbing ----
-            PanelToggle jiggleGrabToggle = PanelToggle.CreateNewEntry(content);
+            PanelToggle jiggleGrabToggle = PanelToggle.CreateNewEntry(rows);
             jiggleGrabToggle.Descriptor.SetTitle(BasisLocalization.Get("menu.individualPlayer.jiggleGrab"));
             jiggleGrabToggle.Descriptor.SetDescription(string.Empty);
             jiggleGrabToggle.Descriptor.SetTooltip(BasisLocalization.Get("menu.individualPlayer.jiggleGrab.description"));
@@ -428,31 +482,6 @@ namespace Basis.BasisUI
             {
                 sync.JiggleGrab?.Invoke(await SetJiggleGrabAllowed(player, allowed));
             };
-
-            // ---- Shout mode (admin only, same gate the Admin tab uses) ----
-            if (hasNetTarget && BasisTalkModeManager.LocalCanShout())
-            {
-                PanelButton shoutBtn = NewAction("menu.individualPlayer.shout.description");
-                void PaintShout()
-                {
-                    if (shoutBtn == null || shoutBtn.Descriptor == null) return;
-                    shoutBtn.Descriptor.SetTitle(BasisLocalization.Get(
-                        BasisShoutAudioDriver.IsInShoutMode(netPlayerId)
-                            ? "menu.individualPlayer.shout.disable"
-                            : "menu.individualPlayer.shout.enable"));
-                }
-                PaintShout();
-                sync.Shout += PaintShout;
-                // No repaint here — shout is a server round trip, so RunAction repaints from
-                // BasisNetworkModeration.OnShoutModeChanged once the change actually lands.
-                shoutBtn.OnClicked += () =>
-                {
-                    if (BasisShoutAudioDriver.IsInShoutMode(netPlayerId))
-                        BasisNetworkModeration.DisableShoutMode(netPlayerId);
-                    else
-                        BasisNetworkModeration.EnableShoutMode(netPlayerId);
-                };
-            }
         }
     }
 }

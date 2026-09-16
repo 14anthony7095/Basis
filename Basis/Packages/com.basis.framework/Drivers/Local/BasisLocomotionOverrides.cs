@@ -5,17 +5,6 @@ using System.Threading;
 
 namespace Basis.Scripts.Drivers
 {
-    [Flags]
-    public enum BasisLocomotionField : byte
-    {
-        None = 0,
-        JumpHeight = 1 << 0,
-        WalkSpeed = 1 << 1,
-        RunSpeed = 1 << 2,
-        Gravity = 1 << 3,
-        Mode = 1 << 4,
-        All = JumpHeight | WalkSpeed | RunSpeed | Gravity | Mode,
-    }
 
     public struct BasisLocomotionValues
     {
@@ -59,6 +48,15 @@ namespace Basis.Scripts.Drivers
     {
         public const string AdminKey = "BasisAdmin";
         public const int AdminPriority = int.MaxValue;
+
+        /// <summary>
+        /// The instance-wide policy the server pushes on join and on change. Reserved like
+        /// <see cref="AdminKey"/> so world content can neither clear nor outrank it, but ranked one
+        /// step below it, so a moderator singling out one player still wins over the house rules.
+        /// </summary>
+        public const string ServerPolicyKey = "BasisServerPolicy";
+        public const int ServerPolicyPriority = int.MaxValue - 1;
+
         public const int DefaultPriority = 0;
 
         private sealed class Entry
@@ -77,7 +75,9 @@ namespace Basis.Scripts.Drivers
 
         public static int Version => Volatile.Read(ref _version);
 
-        public static bool IsReservedKey(string key) => string.Equals(key, AdminKey, StringComparison.Ordinal);
+        public static bool IsReservedKey(string key) =>
+            string.Equals(key, AdminKey, StringComparison.Ordinal) ||
+            string.Equals(key, ServerPolicyKey, StringComparison.Ordinal);
 
         public static void Set(string key, BasisLocomotionValues values) => Set(key, DefaultPriority, values);
 

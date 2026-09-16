@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
-using System.Threading.Tasks;
 using Basis.Scripts.BasisSdk;
 using OpenLipSync.Inference.OVRCompat;
 using UnityEngine;
@@ -75,9 +74,12 @@ namespace Basis.Scripts.Drivers
         private bool _initialized;
         private bool _disposed;
         private bool _faceVisible = true;
+        private bool _muted;
+        private bool _muteReleased;
 
         private const int AudioBufferSize = 48000; // 1 second at 48kHz
         private const float BlendShapeWriteEps = 0.25f;
+        public const float MuteReleaseSeconds = 0.1f;
 
         // Reusable buffer for batch task audio — eliminates per-frame float[] allocation
         private float[] _audioChunk = new float[AudioBufferSize];
@@ -104,11 +106,15 @@ namespace Basis.Scripts.Drivers
         //  - Per-frame budget limits work per batch
         // ──────────────────────────────────��─────────────────────��───
         private static readonly List<BasisOpenLipSyncContext> _pendingInference = new List<BasisOpenLipSyncContext>(64);
-        private static Task _batchTask;
-        private static BasisOpenLipSyncContext[] _cachedBatch;
-        private static int _cachedBatchLen;
-        // Cached delegate — avoids per-frame closure/display-class allocation in Task.Run.
-        private static readonly Action _runBatchInference = RunBatchInference;
+        private sealed class InferenceWorker
+        {
+            public readonly AutoResetEvent Wake = new AutoResetEvent(false);
+            public volatile bool Stop;
+            public Thread Thread;
+            public BasisOpenLipSyncContext[] Batch;
+        }
+        private static InferenceWorker _worker;
+        private static volatile bool _workerBusy;
 
         /// <summary>
         /// Maximum number of contexts to process per batch task.
@@ -139,9 +145,9 @@ namespace Basis.Scripts.Drivers
         /// and mutated in place, so the reference may be cached.
         /// </summary>
         public float[] RawVisemeWeights => _cachedVisemeWeights;
-        public bool DebugTaskRunning => _batchTask != null && !_batchTask.IsCompleted;
+        public bool DebugTaskRunning => _workerBusy;
         public static int DebugPendingCount => _pendingInference.Count;
-        public static bool DebugBatchRunning => _batchTask != null && !_batchTask.IsCompleted;
+        public static bool DebugBatchRunning => _workerBusy;
 
         public void Initialize(BasisAvatar avatar, uint contextHandle)
         {
@@ -394,6 +400,13 @@ namespace Basis.Scripts.Drivers
         public void Simulate(float deltaTime)
         {
             if (!_initialized || _disposed || !_faceVisible) return;
+            if (_muted)
+            {
+                _writeIndexA = 0;
+                _writeIndexB = 0;
+                _hasNewAudio = 0;
+                return;
+            }
 
             // Already queued for batch processing. This is the only gate left: it protects
             // _audioChunk, which the batch task is reading. Whether Apply() has picked up the
@@ -448,43 +461,85 @@ namespace Basis.Scripts.Drivers
         /// </summary>
         public static void ProcessAllPending()
         {
-            // Check for faulted previous batch
-            if (_batchTask?.IsFaulted == true)
-            {
-                Debug.LogWarning($"[OpenLipSync] Batch inference faulted: {_batchTask.Exception?.InnerException?.Message}");
-                _batchTask = null;
-            }
-
-            // Don't start new batch while previous is still running
-            if (_batchTask != null && !_batchTask.IsCompleted) return;
-
-            int take;
             lock (_pendingInference)
             {
-                int batchCount = _pendingInference.Count;
-                if (batchCount == 0) return;
-
-                // Cap batch size to spread work across frames
-                take = Math.Min(batchCount, MaxContextsPerBatch);
-                // Reuse cached batch array to avoid per-frame allocation.
-                if (_cachedBatch == null || _cachedBatch.Length < take)
-                    _cachedBatch = new BasisOpenLipSyncContext[Math.Max(take, MaxContextsPerBatch)];
-                _pendingInference.CopyTo(0, _cachedBatch, 0, take);
-                _pendingInference.RemoveRange(0, take);
+                if (_pendingInference.Count == 0 || _workerBusy) return;
+                _workerBusy = true;
             }
-
-            _cachedBatchLen = take;
-            _batchTask = Task.Run(_runBatchInference);
+            InferenceWorker worker = _worker;
+            if (worker == null || !worker.Thread.IsAlive)
+            {
+                worker = new InferenceWorker();
+                worker.Thread = new Thread(WorkerLoop) { IsBackground = true, Name = "BasisOpenLipSync" };
+                _worker = worker;
+                worker.Thread.Start(worker);
+            }
+            worker.Wake.Set();
         }
 
-        private static void RunBatchInference()
+        public static void StopWorker()
         {
-            var batch = _cachedBatch;
-            int batchLen = _cachedBatchLen;
-            int processed = 0;
-
-            while (batchLen > 0)
+            InferenceWorker worker = _worker;
+            _worker = null;
+            if (worker != null)
             {
+                worker.Stop = true;
+                worker.Wake.Set();
+                if (worker.Thread != Thread.CurrentThread) worker.Thread.Join(500);
+            }
+            lock (_pendingInference)
+            {
+                for (int i = 0; i < _pendingInference.Count; i++) _pendingInference[i]._readyForInference = false;
+                _pendingInference.Clear();
+                _workerBusy = false;
+            }
+        }
+
+        private static void WorkerLoop(object state)
+        {
+            InferenceWorker worker = (InferenceWorker)state;
+            while (true)
+            {
+                worker.Wake.WaitOne();
+                if (worker.Stop) return;
+                try
+                {
+                    RunBatchInference(worker);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[OpenLipSync] Batch inference faulted: {ex.Message}");
+                    lock (_pendingInference)
+                    {
+                        if (!worker.Stop) _workerBusy = false;
+                    }
+                }
+            }
+        }
+
+        private static void RunBatchInference(InferenceWorker worker)
+        {
+            while (true)
+            {
+                int batchLen;
+                lock (_pendingInference)
+                {
+                    if (worker.Stop) return;
+                    int waiting = _pendingInference.Count;
+                    if (waiting == 0)
+                    {
+                        _workerBusy = false;
+                        return;
+                    }
+                    int capacity = Math.Max(1, MaxContextsPerBatch);
+                    if (worker.Batch == null || worker.Batch.Length < capacity)
+                        worker.Batch = new BasisOpenLipSyncContext[capacity];
+                    batchLen = Math.Min(waiting, worker.Batch.Length);
+                    _pendingInference.CopyTo(0, worker.Batch, 0, batchLen);
+                    _pendingInference.RemoveRange(0, batchLen);
+                }
+
+                BasisOpenLipSyncContext[] batch = worker.Batch;
                 for (int i = 0; i < batchLen; i++)
                 {
                     var ctx = batch[i];
@@ -525,26 +580,6 @@ namespace Basis.Scripts.Drivers
                         ctx._readyForInference = false;
                     }
                 }
-
-                processed += batchLen;
-                batchLen = 0;
-
-                // Contexts that arrived while this task was running would otherwise sit until
-                // the next frame boundary, so a room full of speakers accumulates lip-sync lag
-                // in whole frames. Keep the thread we already have and drain them now. Bounded
-                // so one task cannot monopolise a pool thread indefinitely under sustained load.
-                if (processed >= MaxContextsPerBatch * 2) break;
-
-                lock (_pendingInference)
-                {
-                    int waiting = _pendingInference.Count;
-                    if (waiting == 0) break;
-
-                    batchLen = Math.Min(waiting, MaxContextsPerBatch);
-                    if (batch.Length < batchLen) batchLen = batch.Length;
-                    _pendingInference.CopyTo(0, batch, 0, batchLen);
-                    _pendingInference.RemoveRange(0, batchLen);
-                }
             }
         }
 
@@ -561,27 +596,69 @@ namespace Basis.Scripts.Drivers
             if (generation != _consumedGeneration)
             {
                 _consumedGeneration = generation;
-                float[] published = _resultFrames[generation & 1].Visemes;
-                int visemeCount = Math.Min(published.Length, _cachedVisemeWeights.Length);
-                Array.Copy(published, _cachedVisemeWeights, visemeCount);
+                if (!_muted)
+                {
+                    float[] published = _resultFrames[generation & 1].Visemes;
+                    int visemeCount = Math.Min(published.Length, _cachedVisemeWeights.Length);
+                    Array.Copy(published, _cachedVisemeWeights, visemeCount);
+                }
+            }
+
+            if (_muted)
+            {
+                if (_muteReleased) return;
+                ReleaseTowardRest(deltaTime);
             }
 
             if (_identityMapping)
             {
                 ApplyDirect();
-                return;
-            }
-
-            if (_mode == BasisVisemeDriveMode.WinnerTakeAll)
-            {
-                ResolveWinnerTakeAll(deltaTime);
             }
             else
             {
-                ResolveContinuous();
+                if (_mode == BasisVisemeDriveMode.WinnerTakeAll)
+                {
+                    ResolveWinnerTakeAll(deltaTime);
+                }
+                else
+                {
+                    ResolveContinuous();
+                }
+                ApplyShaped(deltaTime);
             }
 
-            ApplyShaped(deltaTime);
+            if (_muted && AtRest())
+            {
+                ZeroVisemes();
+                _muteReleased = true;
+            }
+        }
+
+        private void ReleaseTowardRest(float deltaTime)
+        {
+            float step = deltaTime / MuteReleaseSeconds;
+            for (int i = 0; i < VisemeCount; i++)
+            {
+                float value = _cachedVisemeWeights[i] - step;
+                _cachedVisemeWeights[i] = value > 0f ? value : 0f;
+            }
+        }
+
+        private bool AtRest()
+        {
+            for (int i = 0; i < VisemeCount; i++)
+            {
+                if (_cachedVisemeWeights[i] > 0f) return false;
+                if (_current != null && _hasViseme[i] && _current[i] != _target[i]) return false;
+            }
+            return true;
+        }
+
+        public void SetMuted(bool muted)
+        {
+            if (_muted == muted) return;
+            _muted = muted;
+            _muteReleased = false;
         }
 
         /// <summary>

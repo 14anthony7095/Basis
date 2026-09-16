@@ -394,6 +394,15 @@ namespace Basis.Scripts.Networking
             }
         }
 
+        public static bool RelayAsBroadcast(ushort[] recipients, System.Collections.Generic.List<ushort> directIds, System.Collections.Generic.List<ushort> relayIds, int payloadBytes)
+        {
+            if (recipients != null || relayIds == null || relayIds.Count == 0)
+            {
+                return false;
+            }
+            return directIds == null || directIds.Count == 0 || payloadBytes + sizeof(ushort) * (2 + relayIds.Count) > BasisNetworkCommons.MaxUnfragmentedPayload;
+        }
+
         public static void BroadcastVoiceViaP2P(NetDataWriter clientFormatWriter)
         {
             if (clientFormatWriter == null || clientFormatWriter.Length == 0) return;
@@ -701,6 +710,53 @@ namespace Basis.Scripts.Networking
             }
         }
 
+        // The introduce response is chosen by the server, so without this it can aim every client's
+        // punch at an address of its choosing. An External candidate must be global unicast; an
+        // Internal one may be RFC1918 / ULA / fe80 because that is what a same-LAN peer looks like.
+        private static bool IsAcceptablePunchTarget(IPEndPoint endPoint, LiteNatAddressType type, out string reason)
+        {
+            reason = null;
+            if (endPoint == null || endPoint.Address == null)
+            {
+                reason = "no address";
+                return false;
+            }
+            if (endPoint.Port <= 0 || endPoint.Port > ushort.MaxValue)
+            {
+                reason = $"port {endPoint.Port} is out of range";
+                return false;
+            }
+            IPAddress ip = endPoint.Address;
+            if (!Basis.Scripts.Common.BasisUrlSecurity.IsBlockedAddress(ip, UnityEngine.Application.isEditor, out string blockedReason))
+            {
+                return true;
+            }
+            if (type == LiteNatAddressType.Internal && (IsLanAddress(ip) || IPAddress.IsLoopback(ip)))
+            {
+                return true;
+            }
+            reason = blockedReason;
+            return false;
+        }
+
+        private static bool IsLanAddress(IPAddress ip)
+        {
+            byte[] b = ip.GetAddressBytes();
+            if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork && b.Length == 4)
+            {
+                if (b[0] == 10) return true;
+                if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return true;
+                if (b[0] == 192 && b[1] == 168) return true;
+                return false;
+            }
+            if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 && b.Length == 16)
+            {
+                if ((b[0] & 0xFE) == 0xFC) return true;
+                if (b[0] == 0xFE && (b[1] & 0xC0) == 0x80) return true;
+            }
+            return false;
+        }
+
         private static void OnNatIntroductionSuccess(IPEndPoint targetEndPoint, LiteNatAddressType type, string token)
         {
             if (!_sessionsByToken.TryGetValue(token, out Session s))
@@ -710,6 +766,13 @@ namespace Basis.Scripts.Networking
             }
             if (s.State == P2PSessionState.Connected)
             {
+                return;
+            }
+
+            if (!IsAcceptablePunchTarget(targetEndPoint, type, out string targetReason))
+            {
+                BasisDebug.LogError($"[P2P] Refusing punch target for player {s.OtherPlayerId}: {targetReason}");
+                DropSession(s, P2PSessionState.Failed);
                 return;
             }
 
@@ -874,8 +937,8 @@ namespace Basis.Scripts.Networking
 
             if (channel == BasisNetworkCommons.DeltaAvatarChannel)
             {
-                HandleP2PDeltaFrame(reader, expectedOtherId);
-                reader.Recycle();
+                bool leftoverIsExpected = HandleP2PDeltaFrame(reader, expectedOtherId);
+                reader.Recycle(leftoverIsExpected);
                 return;
             }
 
@@ -917,9 +980,9 @@ namespace Basis.Scripts.Networking
         /// fresh uplink keyframe) or a peer's avatar delta in the standard delta layout, which the
         /// normal delta decoder handles after the embedded-id spoof check.
         /// </summary>
-        private static void HandleP2PDeltaFrame(NetPacketReader reader, ushort expectedOtherId)
+        private static bool HandleP2PDeltaFrame(NetPacketReader reader, ushort expectedOtherId)
         {
-            if (reader.AvailableBytes < 1) return;
+            if (reader.AvailableBytes < 1) return true;
             int origPos = reader.Position;
             byte header = reader.GetByte();
 
@@ -929,20 +992,20 @@ namespace Basis.Scripts.Networking
                 {
                     Basis.Scripts.Networking.NetworkedAvatar.BasisNetworkAvatarCompressor.ForceUplinkKeyframe();
                 }
-                return;
+                return true;
             }
 
             bool largeId = BasisNetworkCommons.DeltaHeaderLargeId(header);
-            if (reader.AvailableBytes < (largeId ? 2 : 1)) return;
+            if (reader.AvailableBytes < (largeId ? 2 : 1)) return true;
             ushort embeddedId = largeId ? reader.GetUShort() : reader.GetByte();
             if (embeddedId != expectedOtherId)
             {
                 BasisDebug.LogWarning($"[P2P] Delta frame id {embeddedId} doesn't match session {expectedOtherId} — dropping spoofed packet.");
-                return;
+                return true;
             }
             reader.SetPosition(origPos);
             BasisNetworkProfiler.AddToCounter(BasisNetworkProfilerCounter.InboundAvatarP2P, reader.AvailableBytes);
-            BasisNetworkHandleAvatarDelta.Handle(reader);
+            return BasisNetworkHandleAvatarDelta.Handle(reader);
         }
 
         private static void HandleDirectP2PPacket(byte channel, NetPacketReader reader, ushort senderPlayerId, DeliveryMethod deliveryMethod)

@@ -1,134 +1,100 @@
 using Unity.Burst;
 using Unity.Collections;
-using Unity.Collections.LowLevel.Unsafe;
 using Unity.Jobs;
 using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.Jobs;
-
 namespace Basis.Scripts.Drivers
 {
-    public enum BasisFilterMode : byte
-    {
-        Passthrough = 0,
-        Fallback = 1,
-        Euro = 2,
-    }
-
-    public struct BasisEuroVec3State
-    {
-        public bool xHasPrev;
-        public bool dxHasPrev;
-        public float3 hatX;
-        public float3 hatDx;
-    }
-
-    public struct BasisEuroQuatState
-    {
-        public bool hasPrev;
-        public quaternion prev;
-        public BasisEuroVec3State logVecState;
-    }
-
     [BurstCompile]
     public struct BasisBatchPositionFilterJob : IJobParallelFor
     {
         [ReadOnly] public NativeArray<byte> mode;
         [ReadOnly] public NativeArray<float3> rawInputs;
         [ReadOnly] public NativeArray<float4> tuning;
-
         public NativeArray<BasisEuroVec3State> euroStates;
         public NativeArray<float3> fallbackStates;
-
         [WriteOnly] public NativeArray<float3> outputs;
-
         public float dt;
-
-        // Inputs and filter state are playspace-local; outputs leave in world through this
-        // matrix. Filtering locally means intentional playspace motion (stick locomotion,
-        // turning, teleports, seats) passes through with zero lag — only tracking-space
-        // motion, where the sensor noise actually lives, is smoothed.
         public float4x4 playspaceToWorld;
-
-        public unsafe void Execute(int i)
+        // Indexers, not UnsafeUtility: six arrays are indexed by the same i and nothing here checks
+        // they are the same length, so a caller scheduling on one array's count while another is
+        // short read/wrote off the end of a heap block with no diagnostic in any build. Burst strips
+        // the container bounds check when ENABLE_UNITY_COLLECTIONS_CHECKS is off, so a player build
+        // emits the same loads and stores it did before and the editor now catches the mismatch.
+        public void Execute(int i)
         {
-            byte m = UnsafeUtility.ReadArrayElement<byte>(mode.GetUnsafeReadOnlyPtr(), i);
-            float3 x = UnsafeUtility.ReadArrayElement<float3>(rawInputs.GetUnsafeReadOnlyPtr(), i);
-            void* outPtr = outputs.GetUnsafePtr();
+            byte m = mode[i];
+            float3 x = rawInputs[i];
 
             if (m == (byte)BasisFilterMode.Passthrough)
             {
-                UnsafeUtility.WriteArrayElement(outPtr, i, math.transform(playspaceToWorld, x));
+                outputs[i] = math.transform(playspaceToWorld, x);
                 return;
             }
 
-            float4 t = UnsafeUtility.ReadArrayElement<float4>(tuning.GetUnsafeReadOnlyPtr(), i);
+            float4 t = tuning[i];
 
             if (m == (byte)BasisFilterMode.Fallback)
             {
-                ref float3 fs = ref UnsafeUtility.ArrayElementAsRef<float3>(fallbackStates.GetUnsafePtr(), i);
-                fs = math.lerp(fs, x, t.w);
-                UnsafeUtility.WriteArrayElement(outPtr, i, math.transform(playspaceToWorld, fs));
+                float3 fs = BasisFilterMath.IsFinite(x) ? math.lerp(fallbackStates[i], x, t.w) : fallbackStates[i];
+                if (!BasisFilterMath.IsFinite(fs)) fs = BasisFilterMath.IsFinite(x) ? x : float3.zero;
+                fallbackStates[i] = fs;
+                outputs[i] = math.transform(playspaceToWorld, fs);
                 return;
             }
 
-            ref BasisEuroVec3State st = ref UnsafeUtility.ArrayElementAsRef<BasisEuroVec3State>(euroStates.GetUnsafePtr(), i);
+            BasisEuroVec3State st = euroStates[i];
             float3 result = BasisFilterMath.EuroVec3(ref st, x, math.max(dt, 1e-6f), t.x, t.y, t.z);
-            UnsafeUtility.WriteArrayElement(outPtr, i, math.transform(playspaceToWorld, result));
+            euroStates[i] = st;
+            outputs[i] = math.transform(playspaceToWorld, result);
         }
     }
-
     [BurstCompile]
     public struct BasisBatchRotationFilterJob : IJobParallelFor
     {
         [ReadOnly] public NativeArray<byte> mode;
         [ReadOnly] public NativeArray<quaternion> rawInputs;
         [ReadOnly] public NativeArray<float4> tuning;
-
         public NativeArray<BasisEuroQuatState> euroStates;
         public NativeArray<quaternion> fallbackStates;
-
         [WriteOnly] public NativeArray<quaternion> outputs;
-
         public float dt;
-
-        // Same playspace-local convention as the position job: local in, world out.
         public quaternion playspaceRotation;
-
-        public unsafe void Execute(int i)
+        // See BasisBatchPositionFilterJob.Execute for why these are indexers and not UnsafeUtility.
+        public void Execute(int i)
         {
-            byte m = UnsafeUtility.ReadArrayElement<byte>(mode.GetUnsafeReadOnlyPtr(), i);
-            quaternion q = UnsafeUtility.ReadArrayElement<quaternion>(rawInputs.GetUnsafeReadOnlyPtr(), i);
-            void* outPtr = outputs.GetUnsafePtr();
+            byte m = mode[i];
+            quaternion q = rawInputs[i];
 
             if (m == (byte)BasisFilterMode.Passthrough)
             {
-                UnsafeUtility.WriteArrayElement(outPtr, i, math.mul(playspaceRotation, q));
+                outputs[i] = math.mul(playspaceRotation, q);
                 return;
             }
 
-            float4 t = UnsafeUtility.ReadArrayElement<float4>(tuning.GetUnsafeReadOnlyPtr(), i);
+            float4 t = tuning[i];
 
             if (m == (byte)BasisFilterMode.Fallback)
             {
-                ref quaternion fs = ref UnsafeUtility.ArrayElementAsRef<quaternion>(fallbackStates.GetUnsafePtr(), i);
-                fs = BasisFilterMath.SlerpShortest(fs, q, t.w);
-                UnsafeUtility.WriteArrayElement(outPtr, i, math.mul(playspaceRotation, fs));
+                quaternion fs = BasisFilterMath.IsUnit(q) ? BasisFilterMath.SlerpShortest(fallbackStates[i], q, t.w) : fallbackStates[i];
+                if (!BasisFilterMath.IsUnit(fs)) fs = BasisFilterMath.IsUnit(q) ? q : quaternion.identity;
+                fallbackStates[i] = fs;
+                outputs[i] = math.mul(playspaceRotation, fs);
                 return;
             }
 
-            ref BasisEuroQuatState st = ref UnsafeUtility.ArrayElementAsRef<BasisEuroQuatState>(euroStates.GetUnsafePtr(), i);
+            BasisEuroQuatState st = euroStates[i];
             quaternion result = BasisFilterMath.EuroQuat(ref st, q, math.max(dt, 1e-6f), t.x, t.y, t.z);
-            UnsafeUtility.WriteArrayElement(outPtr, i, math.mul(playspaceRotation, result));
+            euroStates[i] = st;
+            outputs[i] = math.mul(playspaceRotation, result);
         }
     }
-
     [BurstCompile]
     public struct BasisReadBoneWorldPoseJob : IJobParallelForTransform
     {
         public NativeArray<float3> Positions;
         public NativeArray<quaternion> Rotations;
-
         public void Execute(int index, TransformAccess transform)
         {
             transform.GetPositionAndRotation(out Vector3 position, out Quaternion rotation);
@@ -136,7 +102,6 @@ namespace Basis.Scripts.Drivers
             Rotations[index] = rotation;
         }
     }
-
     [BurstCompile]
     public static class BasisFilterMath
     {
@@ -145,77 +110,62 @@ namespace Basis.Scripts.Drivers
             float tau = 1.0f / (2.0f * math.PI * cutoff);
             return 1.0f / (1.0f + tau / math.max(dt, 1e-6f));
         }
-
+        public static bool IsFinite(float3 v) => math.all(math.isfinite(v));
+        public static bool IsUnit(quaternion q)
+        {
+            float lengthSq = math.lengthsq(q.value);
+            return lengthSq > 0.5f && lengthSq < 2f;
+        }
         public static float3 EuroVec3(ref BasisEuroVec3State st, float3 x, float dt, float minCutoff, float beta, float dCutoff)
         {
-            float3 prevHatX = st.xHasPrev ? st.hatX : x;
-            float3 dx = (prevHatX - x) / dt;
-
+            if (!IsFinite(x)) return st.xHasPrev && IsFinite(st.hatX) ? st.hatX : float3.zero;
+            if (st.xHasPrev && (!IsFinite(st.hatX) || !IsFinite(st.hatDx))) st = default;
+            float3 prevHatX = st.xHasPrev ? st.hatX : x, dx = (prevHatX - x) / dt;
             float ad = Alpha(dCutoff, dt);
             if (st.dxHasPrev) st.hatDx = math.lerp(st.hatDx, dx, ad);
             else { st.hatDx = dx; st.dxHasPrev = true; }
 
-            float cutoff = minCutoff + beta * math.length(st.hatDx);
-            float a = Alpha(cutoff, dt);
+            float cutoff = minCutoff + beta * math.length(st.hatDx), a = Alpha(cutoff, dt);
 
             if (st.xHasPrev) st.hatX = math.lerp(st.hatX, x, a);
             else { st.hatX = x; st.xHasPrev = true; }
 
             return st.hatX;
         }
-
         public static quaternion EuroQuat(ref BasisEuroQuatState st, quaternion q, float dt, float minCutoff, float beta, float dCutoff)
         {
+            if (!IsUnit(q)) return st.hasPrev && IsUnit(st.prev) ? st.prev : quaternion.identity;
+            if (st.hasPrev && (!IsUnit(st.prev) || !IsFinite(st.logVecState.hatDx))) st = default;
             if (!st.hasPrev)
             {
                 st.hasPrev = true;
-                st.prev = q;
-                return q;
+                st.prev = math.normalize(q);
+                st.logVecState = default;
+                return st.prev;
             }
-
-            float4 pv = st.prev.value;
-            float4 qv = q.value;
+            dt = math.max(dt, 1e-6f);
+            float4 pv = st.prev.value, qv = q.value;
             if (math.dot(pv, qv) < 0f) qv = -qv;
             q = new quaternion(qv);
-
-            quaternion prevInv = math.conjugate(st.prev);
-            quaternion delta = math.mul(q, prevInv);
-
-            float4 dv = delta.value;
-            float w = math.clamp(dv.w, -1f, 1f);
-            float halfAngle = math.acos(w);
-            float angle = 2f * halfAngle;
-            if (angle > math.PI) angle -= 2f * math.PI;
-
-            float sinHalf = math.sqrt(math.max(0f, 1f - w * w));
-            float3 axis = sinHalf > 1e-6f ? dv.xyz / sinHalf : new float3(0f, 0f, 0f);
-            float3 logVec = axis * angle;
-
-            float3 filteredLog = EuroVec3(ref st.logVecState, logVec, dt, minCutoff, beta, dCutoff);
-
-            float mag = math.length(filteredLog);
-            quaternion filteredDelta;
-            if (mag < 1e-6f)
+            float4 dv = math.mul(q, math.conjugate(st.prev)).value;
+            float w = math.clamp(dv.w, -1f, 1f), sinHalf = math.sqrt(math.max(0f, 1f - w * w));
+            float3 rate = sinHalf > 1e-6f ? dv.xyz * (2f * math.acos(w) / (sinHalf * dt)) : float3.zero;
+            float ad = Alpha(dCutoff, dt);
+            if (st.logVecState.dxHasPrev) st.logVecState.hatDx = math.lerp(st.logVecState.hatDx, rate, ad);
+            else { st.logVecState.hatDx = rate; st.logVecState.dxHasPrev = true; }
+            float cutoff = minCutoff + beta * math.length(st.logVecState.hatDx), a = Alpha(cutoff, dt);
+            quaternion outQ = math.normalize(SlerpShortest(st.prev, q, a));
+            if (!IsUnit(outQ))
             {
-                filteredDelta = quaternion.identity;
+                st = default;
+                return q;
             }
-            else
-            {
-                float3 unit = filteredLog / mag;
-                float halfMag = mag * 0.5f;
-                float s = math.sin(halfMag);
-                filteredDelta = new quaternion(unit.x * s, unit.y * s, unit.z * s, math.cos(halfMag));
-            }
-
-            quaternion outQ = math.mul(filteredDelta, st.prev);
             st.prev = outQ;
             return outQ;
         }
-
         public static quaternion SlerpShortest(quaternion a, quaternion b, float t)
         {
-            float4 av = a.value;
-            float4 bv = b.value;
+            float4 av = a.value, bv = b.value;
             float cosHalf = math.dot(av, bv);
             if (cosHalf < 0f) { bv = -bv; cosHalf = -cosHalf; }
 
@@ -225,10 +175,8 @@ namespace Basis.Scripts.Drivers
                 return new quaternion(r);
             }
 
-            float halfAngle = math.acos(math.min(cosHalf, 1f));
-            float sinHalf = math.sin(halfAngle);
-            float wa = math.sin((1f - t) * halfAngle) / sinHalf;
-            float wb = math.sin(t * halfAngle) / sinHalf;
+            float halfAngle = math.acos(math.min(cosHalf, 1f)), sinHalf = math.sin(halfAngle);
+            float wa = math.sin((1f - t) * halfAngle) / sinHalf, wb = math.sin(t * halfAngle) / sinHalf;
             return new quaternion(av * wa + bv * wb);
         }
     }

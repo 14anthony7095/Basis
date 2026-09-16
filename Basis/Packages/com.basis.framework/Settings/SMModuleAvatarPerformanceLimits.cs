@@ -106,17 +106,22 @@ public static class SMModuleAvatarPerformanceLimits
         {
             return;
         }
+        if (BasisAvatarFactory.ClearDownloadLimitFailure(player))
+        {
+            player.ReloadAvatar();
+            return;
+        }
         if (player.BasisAvatar == null || player.IsConsideredFallBackAvatar)
         {
             bool wasBlocked = player.LastPerformanceInfo.Blocked;
-            bool wouldBeBlocked = BasisAvatarPerformanceLimits.Evaluate(bundle.BasisBundleConnector).Blocked;
+            bool wouldBeBlocked = BasisAvatarPerformanceLimits.EvaluateForPlayer(bundle.BasisBundleConnector, player.AvatarAlwaysLoaded).Blocked;
             if (wasBlocked != wouldBeBlocked)
             {
                 player.ReloadAvatar();
             }
             return;
         }
-        var action = BasisAvatarPerformanceLimits.DetermineAction(bundle.BasisBundleConnector, player.LastPerformanceInfo);
+        var action = BasisAvatarPerformanceLimits.DetermineAction(bundle.BasisBundleConnector, player.LastPerformanceInfo, player.AvatarAlwaysLoaded);
         switch (action)
         {
             case BasisAvatarPerformanceLimits.ReconcileAction.None:

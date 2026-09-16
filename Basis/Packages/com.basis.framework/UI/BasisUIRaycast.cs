@@ -61,6 +61,7 @@ namespace Basis.Scripts.UI
 
         public BasisPointerEventData CurrentEventData;
         public bool HadRaycastUITarget = false;
+        public bool HadUISurface = false;
         public bool WasCorrectLayer = false;
         static readonly Vector3[] s_Corners = new Vector3[4];
         [SerializeField]
@@ -73,12 +74,16 @@ namespace Basis.Scripts.UI
         // re-resolving getters, and the hit sort would otherwise re-read them O(n^2).
         private int[] _hitLayers = System.Array.Empty<int>();
         private Transform[] _hitTransforms = System.Array.Empty<Transform>();
+        private int[] _hitSortingOrders = System.Array.Empty<int>();
         // Canvas hierarchy under a hit collider is near-static; cache the walk and re-walk rarely.
         private struct CanvasCacheEntry { public Canvas[] Canvases; public int Frame; }
         private readonly Dictionary<Transform, CanvasCacheEntry> _canvasCache = new Dictionary<Transform, CanvasCacheEntry>();
         private const int CanvasCacheRevalidateFrames = 30;
         public bool IgnoreReversedGraphics = true;
         public Vector3 highlightQuadInitialSize;
+        public static float DesktopReticleScreenHeightFraction = 0.025f;
+        private Transform highlightQuadTransform;
+        private float highlightQuadUnitHeight = 1f;
         public bool HasOnPlayersHeightChanged = false;
         public BasisCursorType ActiveCursorType = BasisCursorType.Default;
         public Renderer ReticleRenderer;
@@ -150,6 +155,8 @@ namespace Basis.Scripts.UI
                 gameObject.transform.SetParent(BasisLocalPlayer.Instance.transform);
                 highlightQuadInitialSize = gameObject.transform.localScale;
                 highlightQuadInstance = gameObject;
+                highlightQuadTransform = gameObject.transform;
+                highlightQuadUnitHeight = highlightQuadTransform is RectTransform highlightRect && highlightRect.rect.height > 0f ? highlightRect.rect.height : 1f;
                 if (highlightQuadInstance.TryGetComponent(out Canvas Canvas))
                 {
                     Canvas.worldCamera = BasisLocalCameraDriver.Instance.Camera;
@@ -204,6 +211,7 @@ namespace Basis.Scripts.UI
             SortedRays.Clear();
             HadRaycastUITarget = false;
             HadToolkitPanelTarget = false;
+            HadUISurface = false;
             HitToolkitPanel = null;
 
             int hitCount = BasisPointRaycaster.PhysicHitCount;
@@ -222,6 +230,7 @@ namespace Basis.Scripts.UI
             {
                 _hitLayers = new int[hitCount];
                 _hitTransforms = new Transform[hitCount];
+                _hitSortingOrders = new int[hitCount];
             }
             _uiHitOrder.Clear();
             for (int i = 0; i < hitCount; i++)
@@ -232,6 +241,12 @@ namespace Basis.Scripts.UI
                 {
                     _hitLayers[i] = c.gameObject.layer;
                     _hitTransforms[i] = hits[i].transform;
+                    Canvas hitCanvas = GetHitCanvas(_hitTransforms[i], _hitLayers[i]);
+                    _hitSortingOrders[i] = hitCanvas != null ? hitCanvas.sortingOrder : 0;
+                    if (hitCanvas != null && hitCanvas.isActiveAndEnabled)
+                    {
+                        HadUISurface = true;
+                    }
                     _uiHitOrder.Add(i);
                 }
             }
@@ -242,7 +257,7 @@ namespace Basis.Scripts.UI
                 int currentIndex = _uiHitOrder[i];
                 int insertIndex = i - 1;
 
-                while (insertIndex >= 0 && CompareUiHitOrder(_hitLayers, hits, currentIndex, _uiHitOrder[insertIndex]) < 0)
+                while (insertIndex >= 0 && CompareUiHitOrder(_hitLayers, _hitSortingOrders, hits, currentIndex, _uiHitOrder[insertIndex]) < 0)
                 {
                     _uiHitOrder[insertIndex + 1] = _uiHitOrder[insertIndex];
                     insertIndex--;
@@ -283,6 +298,10 @@ namespace Basis.Scripts.UI
                 BasisUIToolkitPanel toolkitPanel = GetToolkitPanel(candidateTransform);
                 if (toolkitPanel != null)
                 {
+                    if (IsUILayer(_hitLayers[hitIndex]))
+                    {
+                        HadUISurface = true;
+                    }
                     PhysicHit = hits[hitIndex];
                     DidPhysicHit = true;
                     HitCollider = PhysicHit.collider;
@@ -365,7 +384,7 @@ namespace Basis.Scripts.UI
             return layer == OverlayUI || layer == HandHeldCameraUI;
         }
 
-        private static int CompareUiHitOrder(int[] layers, RaycastHit[] hits, int leftIndex, int rightIndex)
+        private static int CompareUiHitOrder(int[] layers, int[] sortingOrders, RaycastHit[] hits, int leftIndex, int rightIndex)
         {
             bool leftIsOverlay = IsOverlayLayer(layers[leftIndex]);
             bool rightIsOverlay = IsOverlayLayer(layers[rightIndex]);
@@ -375,7 +394,57 @@ namespace Basis.Scripts.UI
                 return leftIsOverlay ? -1 : 1;
             }
 
+            // Panels sharing a layer are stacked by canvas sorting order, and the one drawn on top
+            // has to be the one that takes the press. Distance cannot answer that: an overlay panel
+            // is regularly coplanar with the page it covers, and Physics.RaycastNonAlloc hands back
+            // tied hits in an arbitrary order, so the page underneath won a coin flip every time a
+            // dialogue opened over it. Only hits on the same layer are ranked this way, which
+            // leaves unrelated surfaces (world UI, the handheld camera) sorting by distance.
+            int stackCompare = CompareStackedPanels(layers[leftIndex], sortingOrders[leftIndex], layers[rightIndex], sortingOrders[rightIndex]);
+            if (stackCompare != 0)
+            {
+                return stackCompare;
+            }
+
             return hits[leftIndex].distance.CompareTo(hits[rightIndex].distance);
+        }
+
+        /// <summary>
+        /// Which of two UI surfaces on the same layer is stacked on top: the one whose canvas draws
+        /// later. Returns 0 when the two are on different layers or share a sorting order, leaving
+        /// the caller to fall back to ray distance.
+        /// </summary>
+        public static int CompareStackedPanels(int leftLayer, int leftSortingOrder, int rightLayer, int rightSortingOrder)
+        {
+            if (leftLayer != rightLayer)
+            {
+                return 0;
+            }
+
+            return rightSortingOrder.CompareTo(leftSortingOrder);
+        }
+
+        /// <summary>
+        /// The canvas a hit collider belongs to, UI layers only. Its sorting order is the draw order:
+        /// every menu panel is its own root canvas and takes its sorting order from the stack it
+        /// sits in (page, overlay, hotbar), so this is what separates a popup from the page it came
+        /// up over.
+        /// </summary>
+        private static Canvas GetHitCanvas(Transform hitTransform, int layer)
+        {
+            if (hitTransform == null || ((1 << layer) & UILayers) == 0)
+            {
+                return null;
+            }
+
+            // A panel keeps its collider on the same object as its canvas, so the walk almost never
+            // runs; it is here for world UI that hangs its collider off a child.
+            if (!hitTransform.TryGetComponent(out Canvas canvas))
+            {
+                canvas = hitTransform.GetComponentInParent<Canvas>(true);
+            }
+
+            return canvas;
         }
 
         private void HandleNoHit()
@@ -431,7 +500,7 @@ namespace Basis.Scripts.UI
                 if (show)
                 {
                     HighlightState = ActiveStateOfHightlight.On;
-                    highlightQuadInstance.transform.SetPositionAndRotation(point, Quaternion.LookRotation(normal));
+                    PlaceReticle(point, normal);
                 }
                 else
                 {
@@ -620,12 +689,50 @@ namespace Basis.Scripts.UI
             if (show)
             {
                 HighlightState = ActiveStateOfHightlight.On;
-                highlightQuadInstance.transform.SetPositionAndRotation(GetVisualSurfacePoint(), Quaternion.LookRotation(PhysicHit.normal));
+                PlaceReticle(GetVisualSurfacePoint(), PhysicHit.normal);
             }
             else
             {
                 HighlightState = ActiveStateOfHightlight.Off;
             }
+        }
+
+        private void PlaceReticle(Vector3 point, Vector3 normal)
+        {
+            highlightQuadTransform.SetPositionAndRotation(point, Quaternion.LookRotation(normal));
+            ApplyDesktopReticleScreenScale(point);
+        }
+
+        private void ApplyDesktopReticleScreenScale(Vector3 point)
+        {
+            if (highlightQuadUnitHeight <= 0f || !BasisLocalCameraDriver.HasInstance || !BasisDeviceManagement.IsUserInDesktop())
+            {
+                return;
+            }
+            Camera camera = BasisLocalCameraDriver.CameraInstance;
+            if (camera == null || camera.orthographic)
+            {
+                return;
+            }
+            Transform cameraTransform = camera.transform;
+            float depth = Vector3.Dot(point - cameraTransform.position, cameraTransform.forward);
+            if (depth < camera.nearClipPlane)
+            {
+                depth = camera.nearClipPlane;
+            }
+            float viewportWorldHeight = 2f * depth * Mathf.Tan(camera.fieldOfView * 0.5f * Mathf.Deg2Rad);
+            Transform parent = highlightQuadTransform.parent;
+            float parentScale = parent != null ? Mathf.Abs(parent.lossyScale.y) : 1f;
+            if (parentScale < 1e-5f)
+            {
+                parentScale = 1f;
+            }
+            float scale = viewportWorldHeight * DesktopReticleScreenHeightFraction / (highlightQuadUnitHeight * parentScale);
+            if (scale <= 0f || float.IsNaN(scale) || float.IsInfinity(scale))
+            {
+                return;
+            }
+            highlightQuadTransform.localScale = new Vector3(scale, scale, scale);
         }
 
         private static readonly int ReticleColorID = Shader.PropertyToID("_Color");

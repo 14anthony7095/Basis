@@ -5,15 +5,18 @@
         "Unity.Mathematics",
         "LiteNetLib",
         "BasisNetworkCore",
+        "BasisNetworkServer",
         "BasisDebug",
         "Cilbox",
         "BasisEventDriver",
         "BasisSDK",
         "Basis Framework",
+        "BasisSettings",
         "BasisMediaPlayer",
         "BasisSDKEditor",
         "BasisEditor",
-        "HVR.Basis.Comms"
+        "HVR.Basis.Comms",
+        "BasisExamples"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
@@ -22,6 +25,12 @@
     "precompiledReferences": [],
     "autoReferenced": true,
     "defineConstraints": [],
-    "versionDefines": [],
+    "versionDefines": [
+        {
+            "name": "com.basis.examples",
+            "expression": "",
+            "define": "BASIS_HAS_EXAMPLES"
+        }
+    ],
     "noEngineReferences": false
 }

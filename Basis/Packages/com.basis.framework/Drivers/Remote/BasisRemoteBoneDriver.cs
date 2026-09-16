@@ -10,7 +10,6 @@ using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Jobs;
 using Unity.Mathematics;
-using Unity.Profiling;
 using UnityEngine;
 using UnityEngine.Jobs;
 
@@ -1525,7 +1524,6 @@ public static class RemoteBoneJobSystem
     /// Commits all queued registrations. Caller must have completed any in-flight bone jobs first
     /// so the SoA/TAA mutations are safe.
     /// </summary>
-    static readonly ProfilerMarker sMarkerCommitAdds = new ProfilerMarker("BasisDriver.Network.CommitAvatarAdds");
 
     static void DrainPendingAdds()
     {
@@ -1535,7 +1533,7 @@ public static class RemoteBoneJobSystem
         // SyncBoneCount TransformAccessArray Adds per avatar actually land here, one frame stage
         // later and under a completely different parent marker. Attributed so a load-in spike
         // isn't split between two places that look unrelated.
-        using (sMarkerCommitAdds.Auto())
+        using (BasisNetworkMarkers.CommitAvatarAdds.Auto())
         {
             for (int i = 0; i < n; i++)
             {
@@ -2073,7 +2071,7 @@ public static class RemoteBoneJobSystem
                 ReadLocalRot = sIkReadLocalRot,
                 OverrideMask = sIkOverrideMask,
                 BoneCount = BasisBoneRotationCompression.SyncBoneCount,
-                CapacityFixed = BasisRemoteNetworkDriver.FixedCapacity,
+                CapacityFixed = BasisRemoteNetworkDriver.Capacity,
             }.ScheduleReadOnly(sSkeletonBones,
                 math.max(1, math.min(maxBatchSize, (totalBones + workerCount - 1) / workerCount)),
                 JobHandle.CombineDependencies(hipsWorldJob, skeletonJob));
@@ -2146,7 +2144,9 @@ public static class RemoteBoneJobSystem
     /// <returns><c>true</c> if the key is found; otherwise <c>false</c>.</returns>
     public static unsafe bool GetOutGoingMouth(int key, out float3 outgoing)
     {
-        if ((uint)key >= (uint)sKeyToIndex.Length)
+        // sInitialized, like TryGetSOutIndex below: sKeyToIndex is null until Initialize() runs, and
+        // the pointer read past the map lookup has no bounds check of its own to fall back on.
+        if (!sInitialized || sKeyToIndex == null || (uint)key >= (uint)sKeyToIndex.Length)
         {
             outgoing = float3.zero;
             return false;
@@ -2169,7 +2169,7 @@ public static class RemoteBoneJobSystem
     /// <returns><c>true</c> if the key is found; otherwise <c>false</c>.</returns>
     public static unsafe bool GetOutGoingMouthForward(int key, out float3 forward)
     {
-        if ((uint)key >= (uint)sKeyToIndex.Length)
+        if (!sInitialized || sKeyToIndex == null || (uint)key >= (uint)sKeyToIndex.Length)
         {
             forward = new float3(0f, 0f, 1f);
             return false;
@@ -2233,6 +2233,7 @@ public static class RemoteBoneJobSystem
     public static void SetNamePlateActive(int key, bool active)
     {
         if ((uint)key >= (uint)KeySpace) return;
+        CompletePending();
         NativeArray<byte> map = NamePlateActiveMap();
         map[key] = active ? (byte)1 : (byte)0;
     }
@@ -2282,7 +2283,7 @@ public static class RemoteBoneJobSystem
     /// <returns><c>true</c> if the key is found; otherwise <c>false</c>.</returns>
     public static unsafe bool GetOutGoingCenterEye(int key, out float3 position, out quaternion rotation)
     {
-        if ((uint)key >= (uint)sKeyToIndex.Length)
+        if (!sInitialized || sKeyToIndex == null || (uint)key >= (uint)sKeyToIndex.Length)
         {
             position = default;
             rotation = default;

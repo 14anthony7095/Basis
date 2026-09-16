@@ -12,8 +12,6 @@ namespace Basis.Scripts.Rendering
 
         private static readonly List<BasisRemotePlayer> Registered = new List<BasisRemotePlayer>(32);
 
-        public static int RegisteredCount => Registered.Count;
-
         public static void Register(BasisRemotePlayer remote)
         {
             if (remote == null || remote.BasisAvatar == null)
@@ -41,7 +39,7 @@ namespace Basis.Scripts.Rendering
                 BasisVisibilityFlags.Dynamic);
 
             Registered.Add(remote);
-            ApplyShadowEligibility(remote, remote.CurrentLodLevel);
+            ApplyShadowEligibility(remote, remote.CurrentMeshLodLevel);
         }
 
         public static void Unregister(BasisRemotePlayer remote)
@@ -74,18 +72,18 @@ namespace Basis.Scripts.Rendering
             }
 
             bool shadowsSuppressed = BasisAvatarShadowLOD.Enabled && !BasisAvatarShadowLOD.CastsAtLod(lod);
-            bool eligible = shadowsSuppressed && !remote.AlwaysShowAvatar;
+            bool eligible = shadowsSuppressed && !remote.AvatarAlwaysLoaded;
             BasisVisibilityDatabase.SetCullEligible(remote.VisibilityHandle, eligible);
         }
 
         /// <summary>
-        /// Re-runs eligibility when <c>AlwaysShowAvatar</c> flips. Without this the flag is only read
+        /// Re-runs eligibility when <c>AvatarAlwaysLoaded</c> flips. Without this the flag is only read
         /// at registration and on shadow-LOD applies, so marking someone always-show while they are
         /// already past the shadow boundary would leave them cullable — the opposite of the setting.
         /// </summary>
-        public static void OnAlwaysShowAvatarChanged(BasisRemotePlayer remote)
+        public static void OnAvatarAlwaysLoadedChanged(BasisRemotePlayer remote)
         {
-            ApplyShadowEligibility(remote, remote != null ? remote.CurrentLodLevel : 0);
+            ApplyShadowEligibility(remote, remote != null ? remote.CurrentMeshLodLevel : 0);
         }
 
         private static float ReadMaxScale(Transform root)

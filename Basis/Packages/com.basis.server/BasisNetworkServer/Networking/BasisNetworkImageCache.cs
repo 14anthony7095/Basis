@@ -1,8 +1,11 @@
 using Basis.Network.Core;
 using BasisNetworkCore;
+using BasisNetworkServer.Security;
+using BasisPermissions;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using static BasisPermissions.PermissionManager;
 using static SerializableBasis;
 
 namespace Basis.Network.Server.Generic
@@ -17,9 +20,12 @@ namespace Basis.Network.Server.Generic
     /// client therefore sees exactly the OpSpawn/OpChunk stream it would have got from the owner,
     /// and needs no knowledge that the server answered instead.
     ///
-    /// It is just as dumb about *where* an image is. What it hands a player first is an offer - the
-    /// sharer's own spawn header, opcode swapped - and the position inside is bytes it copies without
-    /// reading. Nothing moves until that client measures the distance for itself and asks.
+    /// What it hands a player first is an offer - the sharer's own spawn header, opcode swapped - and
+    /// nothing moves until that client measures the distance for itself and asks. The one thing the
+    /// cache does read out of a payload is where a picture has got to: a spawn header records where a
+    /// picture was hung, and pictures get carried around, so the pose the room last saw is kept and
+    /// written over the header's before an offer or a replay goes out. Anything else about an image
+    /// stays opaque bytes.
     ///
     /// Lifetime matches what clients already do with images, so the cache can never show a joiner
     /// something the room cannot see: an entry is dropped on despawn and when its owner disconnects.
@@ -36,6 +42,7 @@ namespace Basis.Network.Server.Generic
         // Mirrored from BasisImagePickupManager. Wire protocol — changing either side is a break.
         private const byte OpSpawn = 1;
         private const byte OpChunk = 2;
+        private const byte OpTransform = 3;
         private const byte OpDespawn = 4;
         private const byte OpAnimationSpawn = 6;
         private const byte OpAnimationChunk = 7;
@@ -67,6 +74,12 @@ namespace Basis.Network.Server.Generic
         private const int GuidBytes = 16;
         private const int HeaderBytes = OpcodeBytes + GuidBytes;
 
+        /// <summary>Position and rotation, seven floats, written last in a spawn header.</summary>
+        private const int PoseBytes = (3 + 4) * sizeof(float);
+
+        /// <summary>opcode + guid + pose + scale. Fixed, so anything of another length is not one.</summary>
+        private const int TransformBytes = HeaderBytes + PoseBytes + sizeof(float);
+
         /// <summary>Ceiling on a single owner name, matching the client's own read guard.</summary>
         private const int MaxOwnerNameBytes = 1024;
 
@@ -88,10 +101,26 @@ namespace Basis.Network.Server.Generic
             /// it, and because a repeated request must not buy a second copy.
             /// </summary>
             public readonly HashSet<ushort> Delivered = new HashSet<ushort>();
+            public readonly HashSet<ushort> AnimationDelivered = new HashSet<ushort>();
 
             public byte[] Spawn;
             public byte[][] Chunks;
             public int ChunksHeld;
+
+            /// <summary>
+            /// Where the pose sits inside <see cref="Spawn"/>. Walked once when the header is
+            /// admitted rather than stepped over the owner name again on every offer.
+            /// </summary>
+            public int PoseOffset;
+
+            /// <summary>
+            /// The last pose the room was told about, or null while the picture has not moved since
+            /// it was shared. A spawn header says where a picture was *put*; anybody may then pick it
+            /// up and carry it off, and a joiner handed the header alone is shown the empty spot it
+            /// was created in. Retained verbatim like every other payload, so replaying it needs no
+            /// new receive code - and it carries scale, which a spawn header does not.
+            /// </summary>
+            public byte[] Transform;
 
             public byte[] AnimationSpawn;
             public byte[][] AnimationChunks;
@@ -218,6 +247,34 @@ namespace Basis.Network.Server.Generic
             return false;
         }
 
+        public static bool IsAnimationPayload(byte[] payload, int payloadLength)
+        {
+            return payload != null
+                && payloadLength > 0
+                && (payload[0] == OpAnimationSpawn || payload[0] == OpAnimationChunk);
+        }
+
+        public static bool IsGifBlockedFor(NetPeer peer)
+        {
+            if (!BasisGlobalLockManager.GifsLocked)
+            {
+                return false;
+            }
+
+            string uuid = null;
+            if (peer != null && NetworkServer.AuthIdentity != null)
+            {
+                NetworkServer.AuthIdentity.NetIDToUUID(peer, out uuid);
+            }
+            return IsGifBlockedForUuid(uuid);
+        }
+
+        public static bool IsGifBlockedForUuid(string uuid)
+        {
+            return BasisGlobalLockManager.GifsLocked
+                && (string.IsNullOrEmpty(uuid) || !PermissionIntegration.HasValidRequirement(uuid, PermNodes.ModerationGlobalLock));
+        }
+
         /// <summary>
         /// Feeds one relayed image payload to the cache. The caller keeps relaying exactly as before
         /// — this only observes, so a cache that rejects or misparses a message can never stop the
@@ -246,6 +303,9 @@ namespace Basis.Network.Server.Generic
                         break;
                     case OpChunk:
                         ObserveChunk(senderId, payload, payloadLength, animation: false);
+                        break;
+                    case OpTransform:
+                        ObserveTransform(payload, payloadLength);
                         break;
                     case OpServerCacheRequest:
                         ObserveRequest(senderId, payload, payloadLength);
@@ -278,7 +338,11 @@ namespace Basis.Network.Server.Generic
         )
         {
             Guid id = ReadGuid(payload);
-            if (!TryReadSpawnChunkCount(payload, payloadLength, out int totalChunks) || totalChunks <= 0)
+            if (!TryReadSpawnHeader(payload, payloadLength, out int totalChunks, out int poseOffset) || totalChunks <= 0)
+            {
+                return;
+            }
+            if (poseOffset + PoseBytes > payloadLength)
             {
                 return;
             }
@@ -308,6 +372,7 @@ namespace Basis.Network.Server.Generic
                     OwnerId = senderId,
                     Sequence = ++_sequence,
                     Spawn = Copy(payload, payloadLength),
+                    PoseOffset = poseOffset,
                     Chunks = new byte[totalChunks][],
                     Bytes = cost,
                 };
@@ -359,6 +424,44 @@ namespace Basis.Network.Server.Generic
             }
         }
 
+        /// <summary>
+        /// Remembers where a picture has got to. Taken from whoever sent it rather than from the
+        /// owner alone, because control of a card passes to whoever picks it up, so the player
+        /// moving one is very often not the player who shared it. That is no wider a trust surface
+        /// than it appears: the relay has already handed these exact bytes to the whole room, and
+        /// all the cache does is keep what everybody has already been told.
+        /// </summary>
+        private static void ObserveTransform(byte[] payload, int payloadLength)
+        {
+            if (payloadLength != TransformBytes)
+            {
+                return;
+            }
+
+            Guid id = ReadGuid(payload);
+            lock (Gate)
+            {
+                if (!Images.TryGetValue(id, out CachedImage entry))
+                {
+                    return;
+                }
+
+                if (entry.Transform == null)
+                {
+                    // Charged once. Every later pose overwrites a buffer of the same size, so a card
+                    // being dragged around the room costs the buffer nothing after the first update.
+                    if (!TryReserve(entry.OwnerId, TransformBytes, id))
+                    {
+                        return;
+                    }
+                    entry.Bytes += TransformBytes;
+                    System.Threading.Interlocked.Add(ref _totalBytes, TransformBytes);
+                }
+
+                entry.Transform = Copy(payload, payloadLength);
+            }
+        }
+
         private static void ObserveChunk(ushort senderId, byte[] payload, int payloadLength, bool animation)
         {
             // opcode + guid + chunkIndex(4) + length(4) + bytes
@@ -376,6 +479,7 @@ namespace Basis.Network.Server.Generic
             }
 
             bool becameServable = false;
+            bool animationCompleted = false;
             lock (Gate)
             {
                 if (!Images.TryGetValue(id, out CachedImage entry) || entry.OwnerId != senderId)
@@ -408,12 +512,17 @@ namespace Basis.Network.Server.Generic
                 System.Threading.Interlocked.Add(ref _totalBytes, cost);
 
                 becameServable = !animation && entry.StillComplete;
+                animationCompleted = animation && entry.AnimationComplete && entry.StillComplete;
             }
 
             if (becameServable)
             {
                 NotifyOwner(senderId, id, held: true);
                 OfferToRoom(id);
+            }
+            if (animationCompleted)
+            {
+                DeliverPendingAnimation(id);
             }
         }
 
@@ -627,6 +736,7 @@ namespace Basis.Network.Server.Generic
                 {
                     pair.Value.Offered.Remove(ownerId);
                     pair.Value.Delivered.Remove(ownerId);
+                    pair.Value.AnimationDelivered.Remove(ownerId);
                 }
             }
         }
@@ -732,15 +842,32 @@ namespace Basis.Network.Server.Generic
         }
 
         /// <summary>
-        /// An offer is the retained spawn header with one byte changed. Copying rather than mutating
-        /// matters: the original is what gets replayed if the image is actually asked for.
+        /// An offer is the spawn header with one byte changed. The position inside it is what the
+        /// client measures its distance against, so it has to say where the picture is now rather
+        /// than where it was first hung.
         /// </summary>
         private static byte[] BuildOffer(CachedImage entry)
         {
-            byte[] offer = new byte[entry.Spawn.Length];
-            Buffer.BlockCopy(entry.Spawn, 0, offer, 0, entry.Spawn.Length);
+            byte[] offer = BuildSpawn(entry);
             offer[0] = OpServerCacheOffer;
             return offer;
+        }
+
+        /// <summary>
+        /// The retained spawn header with the latest pose written over the one it was shared at.
+        /// Copying rather than mutating is what makes that safe to do at all: the retained header
+        /// stays exactly as the sharer wrote it, and a replay already queued for somebody else keeps
+        /// the bytes it was handed instead of having a pose change torn through it mid-send.
+        /// </summary>
+        private static byte[] BuildSpawn(CachedImage entry)
+        {
+            byte[] spawn = new byte[entry.Spawn.Length];
+            Buffer.BlockCopy(entry.Spawn, 0, spawn, 0, entry.Spawn.Length);
+            if (entry.Transform != null && entry.PoseOffset > 0 && entry.PoseOffset + PoseBytes <= spawn.Length)
+            {
+                Buffer.BlockCopy(entry.Transform, HeaderBytes, spawn, entry.PoseOffset, PoseBytes);
+            }
+            return spawn;
         }
 
         /// <summary>
@@ -797,6 +924,8 @@ namespace Basis.Network.Server.Generic
                 return;
             }
 
+            bool includeAnimation = !IsGifBlockedFor(peer);
+
             // Flatten in the order the room was built, so the pump can meter the stream without
             // knowing anything about images. Ordering matters on the wire: a chunk before its spawn
             // header is discarded by the receiver.
@@ -819,23 +948,117 @@ namespace Basis.Network.Server.Generic
                 }
                 entry.Offered.Add(requesterId);
 
-                queued.Add(new BasisImageBandwidthGovernor.PendingPayload(entry.OwnerId, entry.Spawn));
+                queued.Add(new BasisImageBandwidthGovernor.PendingPayload(entry.OwnerId, BuildSpawn(entry)));
+                if (entry.Transform != null)
+                {
+                    // Ahead of the chunks rather than after them: the receiver raises its card off
+                    // the header, so pose and scale land while the picture is still loading instead
+                    // of the card standing somewhere wrong until the last chunk arrives.
+                    queued.Add(new BasisImageBandwidthGovernor.PendingPayload(entry.OwnerId, entry.Transform));
+                }
                 for (int chunk = 0; chunk < entry.Chunks.Length; chunk++)
                 {
                     queued.Add(new BasisImageBandwidthGovernor.PendingPayload(entry.OwnerId, entry.Chunks[chunk]));
                 }
 
-                if (entry.AnimationComplete)
+                if (includeAnimation && entry.AnimationComplete)
                 {
-                    queued.Add(new BasisImageBandwidthGovernor.PendingPayload(entry.OwnerId, entry.AnimationSpawn));
-                    for (int chunk = 0; chunk < entry.AnimationChunks.Length; chunk++)
+                    entry.AnimationDelivered.Add(requesterId);
+                    AppendAnimationLocked(entry, queued);
+                }
+            }
+
+            DeliverQueued(peer, requesterId, queued);
+        }
+
+        public static void ResumeAnimationsAfterUnlock()
+        {
+            if (!Enabled || BasisGlobalLockManager.GifsLocked)
+            {
+                return;
+            }
+
+            List<Guid> ids = new List<Guid>();
+            lock (Gate)
+            {
+                foreach (KeyValuePair<Guid, CachedImage> pair in Images)
+                {
+                    if (pair.Value.StillComplete && pair.Value.AnimationComplete)
                     {
-                        queued.Add(new BasisImageBandwidthGovernor.PendingPayload(entry.OwnerId, entry.AnimationChunks[chunk]));
+                        ids.Add(pair.Key);
                     }
                 }
             }
 
+            for (int index = 0; index < ids.Count; index++)
+            {
+                DeliverPendingAnimation(ids[index]);
+            }
+        }
+
+        private static void DeliverPendingAnimation(Guid id)
+        {
+            if (!Enabled)
+            {
+                return;
+            }
+
+            List<ushort> pending = new List<ushort>();
+            lock (Gate)
+            {
+                if (!Images.TryGetValue(id, out CachedImage entry) || !entry.StillComplete || !entry.AnimationComplete)
+                {
+                    return;
+                }
+                foreach (ushort recipient in entry.Delivered)
+                {
+                    if (recipient != entry.OwnerId && !entry.AnimationDelivered.Contains(recipient))
+                    {
+                        pending.Add(recipient);
+                    }
+                }
+            }
+
+            for (int index = 0; index < pending.Count; index++)
+            {
+                ushort recipient = pending[index];
+                if (!NetworkServer.AuthenticatedPeers.TryGetValue(recipient, out NetPeer peer) || peer == null || IsGifBlockedFor(peer))
+                {
+                    continue;
+                }
+
+                List<BasisImageBandwidthGovernor.PendingPayload> queued =
+                    new List<BasisImageBandwidthGovernor.PendingPayload>();
+                lock (Gate)
+                {
+                    if (!Images.TryGetValue(id, out CachedImage entry) || !entry.AnimationComplete || !entry.AnimationDelivered.Add(recipient))
+                    {
+                        continue;
+                    }
+                    AppendAnimationLocked(entry, queued);
+                }
+                DeliverQueued(peer, recipient, queued);
+            }
+        }
+
+        private static void AppendAnimationLocked(CachedImage entry, List<BasisImageBandwidthGovernor.PendingPayload> queued)
+        {
+            queued.Add(new BasisImageBandwidthGovernor.PendingPayload(entry.OwnerId, entry.AnimationSpawn));
+            for (int chunk = 0; chunk < entry.AnimationChunks.Length; chunk++)
+            {
+                queued.Add(new BasisImageBandwidthGovernor.PendingPayload(entry.OwnerId, entry.AnimationChunks[chunk]));
+            }
+        }
+
+        private static void DeliverQueued(NetPeer peer, ushort recipientId, List<BasisImageBandwidthGovernor.PendingPayload> queued)
+        {
             if (queued.Count == 0)
+            {
+                return;
+            }
+
+            int managerNetId = System.Threading.Volatile.Read(ref _managerNetId);
+            if (managerNetId < 0)
             {
                 return;
             }
@@ -847,7 +1070,7 @@ namespace Basis.Network.Server.Generic
             BasisImageBandwidthGovernor.SendPayload = ReplaySinglePayload;
             if (BasisImageBandwidthGovernor.EnqueueReplay(peer, queued))
             {
-                BNL.Log($"Image cache queued {queued.Count} payload(s) for requesting peer {requesterId} (paced).");
+                BNL.Log($"Image cache queued {queued.Count} payload(s) for requesting peer {recipientId} (paced).");
                 return;
             }
 
@@ -861,7 +1084,7 @@ namespace Basis.Network.Server.Generic
 
             if (sent > 0)
             {
-                BNL.Log($"Image cache served {sent} payload(s) to requesting peer {requesterId}.");
+                BNL.Log($"Image cache served {sent} payload(s) to requesting peer {recipientId}.");
             }
         }
 
@@ -931,13 +1154,15 @@ namespace Basis.Network.Server.Generic
         }
 
         /// <summary>
-        /// Reads totalChunks out of an OpSpawn header. The owner name in front of it is a
-        /// BinaryWriter string — a 7-bit encoded byte length then UTF8 — so the fields after it sit
-        /// at a variable offset and have to be walked to rather than indexed.
+        /// Reads totalChunks out of an OpSpawn header, and where the pose that follows it begins.
+        /// The owner name in front of both is a BinaryWriter string — a 7-bit encoded byte length
+        /// then UTF8 — so the fields after it sit at a variable offset and have to be walked to
+        /// rather than indexed.
         /// </summary>
-        private static bool TryReadSpawnChunkCount(byte[] payload, int payloadLength, out int totalChunks)
+        private static bool TryReadSpawnHeader(byte[] payload, int payloadLength, out int totalChunks, out int poseOffset)
         {
             totalChunks = 0;
+            poseOffset = 0;
 
             int offset = HeaderBytes + 2; // opcode + guid + ushort ownerId
             if (!TrySkipWireString(payload, payloadLength, ref offset))
@@ -953,6 +1178,7 @@ namespace Basis.Network.Server.Generic
             }
 
             totalChunks = BitConverter.ToInt32(payload, offset);
+            poseOffset = offset + 4;
             return true;
         }
 
@@ -971,6 +1197,7 @@ namespace Basis.Network.Server.Generic
                 {
                     entry.Offered.Add(recipients[index]);
                     entry.Delivered.Add(recipients[index]);
+                    entry.AnimationDelivered.Add(recipients[index]);
                 }
                 return;
             }
@@ -982,6 +1209,7 @@ namespace Basis.Network.Server.Generic
                 {
                     entry.Offered.Add((ushort)peerId);
                     entry.Delivered.Add((ushort)peerId);
+                    entry.AnimationDelivered.Add((ushort)peerId);
                 }
             }
         }

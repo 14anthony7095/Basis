@@ -13,6 +13,9 @@ namespace Cilbox
 
 			// Basis types
 			"BasisNetworkContentBase",
+			// "did the local player spawn this" for a prop, world or avatar, as a bool.
+			// The creator UUID itself stays prop-box only, see CilboxPropBasis.
+			"BasisContent",
             "BasisNetworkContentBase+BasisContentInformation",
             "Basis.Scripts.BasisSdk.Interactions.BasisPickUpUseMode",
 			"Basis.Scripts.Device_Management.Devices.BasisInput", // Restrictive, only used as a type.
@@ -32,8 +35,21 @@ namespace Cilbox
 			// Roster access plus the pose reads IBasisPlayer withholds. Returns players as
 			// IBasisPlayer, and poses as copied Vector3/Quaternion — never a Transform.
 			"Basis.Shims.BasisPlayersShim",
+			// "is this player staff" — the local player's own nodes read straight out of memory,
+			// anyone else's answered by the server one yes/no at a time. Every member returns a
+			// bool or a copied string[]; no UUID and no handle crosses the boundary.
+			"Basis.Shims.BasisPermissionsShim",
 			// Late-latch callback. Auto-added by GetComponent<T> since it derives from CilboxShim.
 			"Basis.Shims.BasisBeforeRenderShim",
+			// "what are the player's graphics settings" - read-only tier lookups plus a fixed
+			// allowlist of keys, so a world can drop its own expensive content on a weak
+			// machine. Every member returns a string, a number, a bool or a copied string[];
+			// nothing here writes a setting.
+			"Basis.Shims.BasisGraphicsSettingsShim",
+			"Basis.Shims.BasisPlatformShim",
+			"BasisPlatformSwitch", // Restrictive, see method whitelist.
+			"BasisPlatformSwitchRule",
+			"Basis.Scripts.Device_Management.BasisPlatformCondition",
 			"Basis.Scripts.BasisSdk.Players.BasisLocalPlayer",
 			"Basis.Scripts.Networking.NetworkedAvatar.BasisNetworkPlayer",
 			"HVR.Basis.Comms.OSC*",
@@ -50,6 +66,7 @@ namespace Cilbox
 
 			// System types - primitives and core data
 			"System.Action",
+			"System.Action`1",
 			"System.Array",
 			"System.BitConverter", // HMMMMMMMMM SUSSY
 			"System.Boolean",
@@ -370,6 +387,8 @@ namespace Cilbox
 			"Basis.Shims.BasisTransformSyncShim.Enabled",
 			"Basis.Shims.BasisBlendShapeSyncShim.Epsilon",
 			"Basis.Shims.BasisBlendShapeSyncShim.Enabled",
+			"BasisPlatformSwitch.Rules",
+			"BasisPlatformSwitchRule.*",
 
 			// Unity Event Systems fields
 			"UnityEngine.EventSystems.EventTrigger+Entry.eventID",
@@ -387,6 +406,9 @@ namespace Cilbox
 			{ typeof(Basis.Scripts.BasisSdk.Interactions.BasisPickupInteractable), new HashSet<string> { } },
 			{ typeof(Basis.Scripts.BasisSdk.Interactions.BasisInteractableObject), new HashSet<string> { } },
 			{ typeof(Basis.Scripts.Device_Management.Devices.BasisInput), new HashSet<string> { } },
+#if BASIS_HAS_EXAMPLES
+			{ typeof(global::BasisPlatformSwitch), new HashSet<string> { nameof(global::BasisPlatformSwitch.Apply) } },
+#endif
 			// IBasisPlayer is reachable through BasisNetworkPlayer.Player, and methods are
 			// default-allow once a type is whitelisted — which handed scripts set_DisplayName,
 			// set_UUID, get_AvatarTransform, get_PlayerSelf and get_GameObject on ANY player, i.e.
@@ -422,6 +444,15 @@ namespace Cilbox
 				typeof(Basis.Scripts.Networking.NetworkedAvatar.BasisNetworkPlayer).GetProperty(nameof(Basis.Scripts.Networking.NetworkedAvatar.BasisNetworkPlayer.LocalPlayer)).GetGetMethod().Name,
 				typeof(Basis.Scripts.Networking.NetworkedAvatar.BasisNetworkPlayer).GetProperty(nameof(Basis.Scripts.Networking.NetworkedAvatar.BasisNetworkPlayer.displayName)).GetGetMethod().Name,
 				"get_playerId", nameof(Basis.Scripts.Networking.NetworkedAvatar.BasisNetworkPlayer.GetAllPlayers),
+				} },
+			{ typeof(BasisContent), new HashSet<string>{ "SpawnedByLocalPlayer" } },
+			// Read-only identity. AssignContentIdentifier and get_ContentInformation are held back:
+			// the first forges a spawn identity, the second hands over the whole struct.
+			{ typeof(BasisNetworkContentBase), new HashSet<string>{
+				"TryGetIdentifier",
+				"TryGetNetworkGUIDIdentifier",
+				"get_clientIdentifier",
+				"get_SpawnedByLocalPlayer",
 				} },
 			{ typeof(UnityEngine.GameObject),          new HashSet<string>{
 				nameof(UnityEngine.GameObject.SetActive),
