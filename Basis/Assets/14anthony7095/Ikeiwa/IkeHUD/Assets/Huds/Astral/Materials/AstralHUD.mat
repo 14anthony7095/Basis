@@ -1,0 +1,159 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!21 &2100000
+Material:
+  serializedVersion: 8
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: AstralHUD
+  m_Shader: {fileID: 4800000, guid: 71eef3f5b5bd0744f9c936590f58b41a, type: 3}
+  m_Parent: {fileID: 0}
+  m_ModifiedSerializedProperties: 0
+  m_ValidKeywords: []
+  m_InvalidKeywords: []
+  m_LightmapFlags: 4
+  m_EnableInstancingVariants: 0
+  m_DoubleSidedGI: 0
+  m_CustomRenderQueue: -1
+  stringTagMap: {}
+  disabledShaderPasses: []
+  m_LockedProperties: 
+  m_SavedProperties:
+    serializedVersion: 3
+    m_TexEnvs:
+    - _BumpMap:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _DetailAlbedoMap:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _DetailMask:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _DetailNormalMap:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _EmissionMap:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _GridTex:
+        m_Texture: {fileID: 2800000, guid: 87410531cd5a43446aa85bc1f3f3e965, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _MainTex:
+        m_Texture: {fileID: 2800000, guid: e61b17dc7cd6c284d982a5b57fa586cd, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _MapBackgroundTex:
+        m_Texture: {fileID: 2800000, guid: 87410531cd5a43446aa85bc1f3f3e965, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _MapDepthHighTex:
+        m_Texture: {fileID: 8400000, guid: b512a9e675cde084b800d2389dd9ab70, type: 2}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _MapDepthTex:
+        m_Texture: {fileID: 8400000, guid: f46cf4d4d5b7da1449e8c7f02ec28c11, type: 2}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _MapForegroundTex:
+        m_Texture: {fileID: 2800000, guid: 84887c5778107674aaf608485718fbc2, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _MetallicGlossMap:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _OcclusionMap:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _ParallaxMap:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _Players:
+        m_Texture: {fileID: 8400000, guid: ce6c3db9fbd5ee1408959b455daa8187, type: 2}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _PlayersTex:
+        m_Texture: {fileID: 8400000, guid: ce6c3db9fbd5ee1408959b455daa8187, type: 2}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _RadarOverlayTex:
+        m_Texture: {fileID: 2800000, guid: 84887c5778107674aaf608485718fbc2, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    m_Ints: []
+    m_Floats:
+    - _BumpScale: 1
+    - _Curvature: 0
+    - _Cutoff: 0.5
+    - _DetailNormalMapScale: 1
+    - _Distance: -1
+    - _DstBlend: 0
+    - _EmissiveStrength: 1
+    - _EnabledModules: 2.1474836e+9
+    - _GlossMapScale: 1
+    - _Glossiness: 0.5
+    - _GlossyReflections: 1
+    - _HUDActive: 1
+    - _Height: 12
+    - _HeightHigh: 20
+    - _HideClock: 0
+    - _HideCompass: 0
+    - _HideCoordinates: 0
+    - _HideFPS: 0
+    - _HideMic: 0
+    - _HideMiniMap: 0
+    - _HideOverlays: 0
+    - _MapSize: 20
+    - _Metallic: 0
+    - _MicEnabled: 1
+    - _MicLevel: 1
+    - _Mode: 0
+    - _OcclusionStrength: 1
+    - _Offset: 2
+    - _OffsetHigh: 10
+    - _Opacity: 1
+    - _Overlay: 1
+    - _OverlayActive: 0
+    - _Parallax: 0.02
+    - _RatioTweak: 0.1
+    - _Scale: 1
+    - _ScaleFactor: 0
+    - _ScaleRatio: 1.18
+    - _SmoothnessTextureChannel: 0
+    - _SpecularHighlights: 1
+    - _SrcBlend: 1
+    - _UVSec: 0
+    - _VRDistance: -1.5
+    - _VRRatioTweak: 0.1
+    - _VRScale: 1
+    - _VRScaleRatio: 1
+    - _VRStereoSeparation: 0
+    - _ZHeight: 12
+    - _ZHeightHigh: 20
+    - _ZOffset: 2
+    - _ZOffsetHigh: 10
+    - _ZWrite: 1
+    m_Colors:
+    - _ActiveColor: {r: 2, g: 0.7607843, b: 0, a: 1}
+    - _Color: {r: 1, g: 1, b: 1, a: 1}
+    - _EmissionColor: {r: 0, g: 0, b: 0, a: 1}
+    - _HUDOffset: {r: 0, g: 0, b: -1, a: 0}
+    - _MapColor: {r: 0, g: 1, b: 1, a: 1}
+    - _PlayerColor: {r: 1, g: 0, b: 0, a: 1}
+    - _PrimaryColor: {r: 0, g: 1, b: 1, a: 1}
+    - _Scale: {r: 1, g: 1, b: 1, a: 0}
+    - _SecondaryColor: {r: 1, g: 0, b: 0, a: 1}
+    - _ShadowColor: {r: 0, g: 0, b: 0, a: 1}
+    - _VRHUDOffset: {r: 0, g: 0, b: -1.25, a: 0}
+  m_BuildTextureStacks: []

@@ -1,0 +1,67 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: -340790334, guid: 67cc4cb7839cd3741b63733d5adf0442, type: 3}
+  m_Name: D20 Dice
+  m_EditorClassIdentifier: 
+  Parameters: {fileID: 11400000, guid: 3dbf8ee5b185e4940aaadc4ef8079ba3, type: 2}
+  controls:
+  - name: Rigged Dice 17-20
+    icon: {fileID: 2800000, guid: 0a603006416dc3549877e8092b9632bb, type: 3}
+    type: 103
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 11400000, guid: 66b44edb577b6f84eb8f19f533553ab3, type: 2}
+    subParameters: []
+    labels: []
+  - name: Rigged Dice 9-16
+    icon: {fileID: 2800000, guid: 0a603006416dc3549877e8092b9632bb, type: 3}
+    type: 103
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 11400000, guid: 8412ea4f1b5671a40aedc1cb1a2ea5bc, type: 2}
+    subParameters: []
+    labels: []
+  - name: Rigged Dice 1-8
+    icon: {fileID: 2800000, guid: 0a603006416dc3549877e8092b9632bb, type: 3}
+    type: 103
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 11400000, guid: 58546cb2382953c46bfe6f653051b907, type: 2}
+    subParameters: []
+    labels: []
+  - name: Roll (While Enable)
+    icon: {fileID: 2800000, guid: 5acca5d9b1a37724880f1a1dc1bc54d3, type: 3}
+    type: 102
+    parameter:
+      name: d20/d20_Menu
+    value: 22
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters: []
+    labels: []
+  - name: <color=#00ff00>Enable</color>  -<color=#ffff00>Hold</color> (If Rolled) 
+      -<color=#ff0000>Disable</color> (While Enable)
+    icon: {fileID: 2800000, guid: 56a4aeacf57328746b05dfde96e34bcd, type: 3}
+    type: 102
+    parameter:
+      name: d20/d20_Menu
+    value: 21
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters: []
+    labels: []

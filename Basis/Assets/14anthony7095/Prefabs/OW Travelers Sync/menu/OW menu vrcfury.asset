@@ -1,0 +1,26 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: -340790334, guid: 67cc4cb7839cd3741b63733d5adf0442, type: 3}
+  m_Name: OW menu vrcfury
+  m_EditorClassIdentifier: 
+  Parameters: {fileID: 11400000, guid: 33de863236a7cc9439f8be6ed50a68b7, type: 2}
+  controls:
+  - name: Travelers Sync
+    icon: {fileID: 2800000, guid: 5062c533dedb11141aa3714dda96e196, type: 3}
+    type: 103
+    parameter:
+      name: 
+    value: 0
+    style: 0
+    subMenu: {fileID: 11400000, guid: e9fdf3f9c63e76c4399d7f8d00f21a59, type: 2}
+    subParameters: []
+    labels: []

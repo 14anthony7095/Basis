@@ -200,11 +200,6 @@ MonoBehaviour:
     m_ReadOnly: 0
     m_SerializedLabels: []
     FlaggedDuringContentUpdateRestriction: 0
-  - m_GUID: 51c066608c024d44b8e43ebda8031e83
-    m_Address: Packages/com.basis.sdk/Textures/Runtime/Platform Icons/logo-generic.png
-    m_ReadOnly: 0
-    m_SerializedLabels: []
-    FlaggedDuringContentUpdateRestriction: 0
   - m_GUID: 528389918ed51d04ebb375283982ac07
     m_Address: Packages/com.basis.sdk/Prefabs/Panel Elements/PE Single Select Entry.prefab
     m_ReadOnly: 0
@@ -222,11 +217,6 @@ MonoBehaviour:
     FlaggedDuringContentUpdateRestriction: 0
   - m_GUID: 6209bf1ff13b00e4ebbdd2722ec1d967
     m_Address: Packages/com.basis.sdk/Textures/Runtime/camera-outline.png
-    m_ReadOnly: 0
-    m_SerializedLabels: []
-    FlaggedDuringContentUpdateRestriction: 0
-  - m_GUID: 96e9340b2362c0a488f4d81dc66f7670
-    m_Address: Packages/com.basis.sdk/Textures/Runtime/sliders.png
     m_ReadOnly: 0
     m_SerializedLabels: []
     FlaggedDuringContentUpdateRestriction: 0
@@ -300,16 +290,6 @@ MonoBehaviour:
     FlaggedDuringContentUpdateRestriction: 0
   - m_GUID: 7f82d6af13c883d4b885adbeab63a58d
     m_Address: Packages/com.basis.sdk/Textures/Runtime/exit-outline.png
-    m_ReadOnly: 0
-    m_SerializedLabels: []
-    FlaggedDuringContentUpdateRestriction: 0
-  - m_GUID: 8cc72aae073d4249b391dbd1155329aa
-    m_Address: Packages/com.basis.sdk/Textures/Runtime/move-outline.png
-    m_ReadOnly: 0
-    m_SerializedLabels: []
-    FlaggedDuringContentUpdateRestriction: 0
-  - m_GUID: 8b6980c020de5fa428b85e14cbdebbf1
-    m_Address: Packages/com.basis.sdk/Textures/Runtime/reset.png
     m_ReadOnly: 0
     m_SerializedLabels: []
     FlaggedDuringContentUpdateRestriction: 0

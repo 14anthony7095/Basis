@@ -1,0 +1,86 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!21 &2100000
+Material:
+  serializedVersion: 8
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: OverlayOutlineAstral
+  m_Shader: {fileID: 4800000, guid: d404789d696b7e140917d3d936f28140, type: 3}
+  m_Parent: {fileID: 0}
+  m_ModifiedSerializedProperties: 0
+  m_ValidKeywords: []
+  m_InvalidKeywords: []
+  m_LightmapFlags: 4
+  m_EnableInstancingVariants: 0
+  m_DoubleSidedGI: 0
+  m_CustomRenderQueue: -1
+  stringTagMap: {}
+  disabledShaderPasses: []
+  m_LockedProperties: 
+  m_SavedProperties:
+    serializedVersion: 3
+    m_TexEnvs:
+    - _DepthTex:
+        m_Texture: {fileID: 8400000, guid: ac781bb96f589954fafd970dfbaa6f17, type: 2}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _HeatGradient:
+        m_Texture: {fileID: 2800000, guid: a7695274d94e5424aa04465935bcab4a, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _MainTex:
+        m_Texture: {fileID: 2800000, guid: 0a086420976a74346b6e9fbf7ccafa14, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _PatternTex:
+        m_Texture: {fileID: 2800000, guid: 271f06ed2b56a2846826e215e27cce44, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _ReflectionTex0:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _ReflectionTex1:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _TilesTex:
+        m_Texture: {fileID: 2800000, guid: 0a086420976a74346b6e9fbf7ccafa14, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    m_Ints:
+    - _ZWrite: 1
+    m_Floats:
+    - _CameraFar: 200
+    - _CameraNear: 0.3
+    - _Distortion: 0.8
+    - _Factor: 1
+    - _Glossiness: 0.5
+    - _Metallic: 0
+    - _OutlineDensity: 0.5
+    - _OutlineDepthBias: 0.5
+    - _OutlineDepthMultiplier: 10
+    - _OutlineThickness: 1.5
+    - _PixelateX: 5
+    - _PixelateY: 5
+    - _Progress: 1
+    - _ProgressEnd: 1.5
+    - _ProgressStart: -0.5
+    - _ScanLinesAlpha: 0
+    - _TessMax: 10.94
+    - _TessMin: 0.7
+    - _TessValue: 32
+    - _TessellationUniform: 64
+    - _TileSmoothness: 0.3
+    - _ZWrite: 1
+    m_Colors:
+    - _BackgroundTint: {r: 0.735849, g: 0.735849, b: 0.735849, a: 1}
+    - _Color: {r: 1, g: 1, b: 1, a: 1}
+    - _PatternColor: {r: 1, g: 1, b: 1, a: 0.078431375}
+    - _PatternSize: {r: 30, g: 30, b: 0, a: 0}
+    - _ShapeFillColor: {r: 1, g: 1, b: 1, a: 0.16470589}
+    - _ShapeOutlineColor: {r: 1, g: 1, b: 1, a: 1}
+  m_BuildTextureStacks: []

@@ -1,0 +1,87 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: -340790334, guid: 67cc4cb7839cd3741b63733d5adf0442, type: 3}
+  m_Name: HUDMainSubMenu
+  m_EditorClassIdentifier: 
+  Parameters: {fileID: 11400000, guid: 20a518ab23a96d14fb38efc6c1e50f23, type: 2}
+  controls:
+  - name: Settings
+    icon: {fileID: 2800000, guid: a2ef0d23bef3c9f409e948af2ad87509, type: 3}
+    type: 103
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 11400000, guid: 0e72243cbee6f4444a0c72debba1b712, type: 2}
+    subParameters: []
+    labels: []
+  - name: Activate HUD
+    icon: {fileID: 2800000, guid: fb8f30e51da45ae47883215767ea0191, type: 3}
+    type: 102
+    parameter:
+      name: HUDSettings/State/HUDEnabled
+    value: 1
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters: []
+    labels: []
+  - name: MiniMap Zoom
+    icon: {fileID: 2800000, guid: d49fb526fbc210c458155c3789150990, type: 3}
+    type: 203
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 11400000, guid: 9578f222cd413d74ead6383edc24d589, type: 2}
+    subParameters:
+    - name: HUDSettings/MinimapZoom
+    labels: []
+  - name: Wireframe Vision
+    icon: {fileID: 2800000, guid: 5482fa61e1a16c64a9cb123a1389cbfa, type: 3}
+    type: 102
+    parameter:
+      name: HUDSettings/State/Overlay
+    value: 1
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters: []
+    labels: []
+  - name: Night Vision
+    icon: {fileID: 2800000, guid: be41302662c9cb44eb301efdd67db022, type: 3}
+    type: 102
+    parameter:
+      name: HUDSettings/State/Overlay
+    value: 2
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters: []
+    labels: []
+  - name: XRay Vision
+    icon: {fileID: 2800000, guid: 5339f3ce65cf7124f8733312d94b8234, type: 3}
+    type: 102
+    parameter:
+      name: HUDSettings/State/Overlay
+    value: 3
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters: []
+    labels: []
+  - name: XRay Settings
+    icon: {fileID: 2800000, guid: 5339f3ce65cf7124f8733312d94b8234, type: 3}
+    type: 103
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 11400000, guid: 9578f222cd413d74ead6383edc24d589, type: 2}
+    subParameters: []
+    labels: []

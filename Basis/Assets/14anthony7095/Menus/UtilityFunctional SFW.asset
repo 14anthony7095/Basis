@@ -1,0 +1,96 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: -340790334, guid: 67cc4cb7839cd3741b63733d5adf0442, type: 3}
+  m_Name: UtilityFunctional SFW
+  m_EditorClassIdentifier: 
+  Parameters: {fileID: 11400000, guid: a08c376797084e8429b51ee12617ab0e, type: 2}
+  controls:
+  - name: Force Reset
+    icon: {fileID: 2800000, guid: 133e86baead2f0d45a8687abf23b7187, type: 3}
+    type: 102
+    parameter:
+      name: 14a/oscsrc/remoteReset
+    value: 1
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters: []
+    labels: []
+  - name: Bedtime Protocol
+    icon: {fileID: 2800000, guid: 8a2d716df17ba4848b73eb468e9d1de1, type: 3}
+    type: 103
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 11400000, guid: 6e5d7d2d4a8b4714fa345a855bfa2de2, type: 2}
+    subParameters: []
+    labels: []
+  - name: TooClose
+    icon: {fileID: 2800000, guid: 847e9a30206f6f441b9e24e45fccebc7, type: 3}
+    type: 103
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 11400000, guid: 28eb254c356b3ff49970813ca61478a0, type: 2}
+    subParameters: []
+    labels: []
+  - name: Camera Prvacy
+    icon: {fileID: 2800000, guid: 5111f25c7ba94da4db8282934dfe4483, type: 3}
+    type: 102
+    parameter:
+      name: 14a/toggle/cameraCloak
+    value: 1
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters: []
+    labels: []
+  - name: Skip Leg Day
+    icon: {fileID: 2800000, guid: 5bc9a8f6683f4c0459b514745ce23274, type: 3}
+    type: 102
+    parameter:
+      name: 14a/toggle/skipLegDay
+    value: 1
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters: []
+    labels: []
+  - name: '[<color=#0000FF>OSC</color>] Scale to Room'
+    icon: {fileID: 2800000, guid: 98700733f3503c44f8e5b52085aa186c, type: 3}
+    type: 102
+    parameter:
+      name: 14a/button/roomScaleRay
+    value: 1
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters: []
+    labels: []
+  - name: Super Stretchy
+    icon: {fileID: 2800000, guid: 6ec88854976300b43b19e7cf26c1d0bf, type: 3}
+    type: 102
+    parameter:
+      name: toggle/physboneSuperStretch
+    value: 1
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters: []
+    labels: []
+  - name: Allow Posing
+    icon: {fileID: 2800000, guid: 6ec88854976300b43b19e7cf26c1d0bf, type: 3}
+    type: 102
+    parameter:
+      name: toggle/physboneAllowPoseOthers
+    value: 1
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters: []
+    labels: []

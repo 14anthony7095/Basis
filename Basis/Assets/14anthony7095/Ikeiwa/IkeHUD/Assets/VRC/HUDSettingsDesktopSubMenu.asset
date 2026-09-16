@@ -1,0 +1,91 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: -340790334, guid: 67cc4cb7839cd3741b63733d5adf0442, type: 3}
+  m_Name: HUDSettingsDesktopSubMenu
+  m_EditorClassIdentifier: 
+  Parameters: {fileID: 11400000, guid: 20a518ab23a96d14fb38efc6c1e50f23, type: 2}
+  controls:
+  - name: Distance
+    icon: {fileID: 2800000, guid: 309c46f55c9ca104faeadeac7c5e3f2f, type: 3}
+    type: 203
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters:
+    - name: HUDSettings/Desktop/Distance
+    labels: []
+  - name: Offset
+    icon: {fileID: 2800000, guid: 5118683b646779e418578b184740f465, type: 3}
+    type: 201
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters:
+    - name: HUDSettings/Desktop/Offset-x
+    - name: HUDSettings/Desktop/Offset-y
+    labels:
+    - name: 
+      icon: {fileID: 0}
+    - name: 
+      icon: {fileID: 0}
+    - name: 
+      icon: {fileID: 0}
+    - name: 
+      icon: {fileID: 0}
+  - name: Scale
+    icon: {fileID: 2800000, guid: da73a7b004236de42bad0962c7d51b8b, type: 3}
+    type: 203
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters:
+    - name: HUDSettings/Desktop/Scale
+    labels: []
+  - name: Ratio
+    icon: {fileID: 2800000, guid: dc3e8c0a44915474db160591d0377bb4, type: 3}
+    type: 203
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters:
+    - name: HUDSettings/Desktop/Ratio
+    labels: []
+  - name: Elements Scale
+    icon: {fileID: 2800000, guid: 0030c903dd17efa498c24b60c0fc7016, type: 3}
+    type: 203
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters:
+    - name: HUDSettings/Desktop/ScaleRatio
+    labels: []
+  - name: Opacity
+    icon: {fileID: 2800000, guid: 370e12605194a174fba4fbcc55561a26, type: 3}
+    type: 203
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters:
+    - name: HUDSettings/Opacity
+    labels: []

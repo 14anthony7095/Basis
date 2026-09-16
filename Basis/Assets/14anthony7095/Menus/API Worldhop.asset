@@ -1,0 +1,97 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: -340790334, guid: 67cc4cb7839cd3741b63733d5adf0442, type: 3}
+  m_Name: API Worldhop
+  m_EditorClassIdentifier: 
+  Parameters: {fileID: 11400000, guid: a08c376797084e8429b51ee12617ab0e, type: 2}
+  controls:
+  - name: Start Hub
+    icon: {fileID: 2800000, guid: e08d1a11a07e55341a24b4b69d11340f, type: 3}
+    type: 101
+    parameter:
+      name: api/explore/start
+    value: 1
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters: []
+    labels: []
+  - name: Next World
+    icon: {fileID: 2800000, guid: 40d5992509b3c8d44ac85d9c1cc9318d, type: 3}
+    type: 102
+    parameter:
+      name: api/explore/next
+    value: 1
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters: []
+    labels: []
+  - name: Stop Exploration
+    icon: {fileID: 2800000, guid: 6aa323eeca0a8214388feca507e841a8, type: 3}
+    type: 101
+    parameter:
+      name: api/explore/stop
+    value: 1
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters: []
+    labels: []
+  - name: Refill Queue
+    icon: {fileID: 2800000, guid: e904aa4ae0debee45b2a772ee3bcd9f8, type: 3}
+    type: 101
+    parameter:
+      name: api/explore/prefill
+    value: 1
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters: []
+    labels: []
+  - name: 
+    icon: {fileID: 2800000, guid: c21d494c3fcc2d7459b17ba111f07f26, type: 3}
+    type: 101
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters: []
+    labels: []
+  - name: <color=#00FF00>Invite to Next?</color>
+    icon: {fileID: 2800000, guid: 9ca33ac32aef46c4d88cf75c72ba2a3e, type: 3}
+    type: 102
+    parameter:
+      name: api/explore/inviteMode
+    value: 1
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters: []
+    labels: []
+  - name: Instance Type
+    icon: {fileID: 2800000, guid: 7d48150331d91e441984c52618506041, type: 3}
+    type: 103
+    parameter:
+      name: 
+    value: 0
+    style: 0
+    subMenu: {fileID: 11400000, guid: 1b23f5daa62f6b34cb048ba6bf557925, type: 2}
+    subParameters:
+    - name: 
+    labels: []
+  - name: <color=#00FF00>Auto-Close?</color>
+    icon: {fileID: 2800000, guid: 37fee01b617b5d04e9c71c86f5efe346, type: 3}
+    type: 102
+    parameter:
+      name: api/explore/autoClose
+    value: 1
+    style: 0
+    subMenu: {fileID: 0}
+    subParameters: []
+    labels: []

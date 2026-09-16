@@ -1,0 +1,107 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: -340790334, guid: 67cc4cb7839cd3741b63733d5adf0442, type: 3}
+  m_Name: _MainFTv6 MainMenu SFW
+  m_EditorClassIdentifier: 
+  Parameters: {fileID: 11400000, guid: a08c376797084e8429b51ee12617ab0e, type: 2}
+  controls:
+  - name: <b>GoGo Loco</b>
+    icon: {fileID: 2800000, guid: 712238f917172e24081f7eede9f36482, type: 3}
+    type: 103
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 11400000, guid: a0468df435f5a544ab277df24d7fe17d, type: 2}
+    subParameters: []
+    labels: []
+  - name: <color=#FF0000>API</color> <color=white>Triggers</color>
+    icon: {fileID: 2800000, guid: dff5fd66278bade4e8c2c214fa967e13, type: 3}
+    type: 103
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 11400000, guid: ea8fd23ecb337f14fb699fd8b6179397, type: 2}
+    subParameters: []
+    labels: []
+  - name: <color=#00FF00>MIDI</color> <color=#ffffff>Control</color>
+    icon: {fileID: 2800000, guid: 368f479b5f8e77744a3d413d8fa7b2cb, type: 3}
+    type: 201
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 11400000, guid: 1eff4ccfabf455242a33884cecce971e, type: 2}
+    subParameters:
+    - name: 14a/osc/menuX
+    - name: 14a/osc/menuY
+    labels:
+    - name: 
+      icon: {fileID: 0}
+    - name: 
+      icon: {fileID: 0}
+    - name: 
+      icon: {fileID: 0}
+    - name: 
+      icon: {fileID: 0}
+  - name: ToN ToolKit
+    icon: {fileID: 2800000, guid: e6df367f09b7b0d4f8c16286c7490ccd, type: 3}
+    type: 103
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 11400000, guid: 5206628e27767b246af0d5c08f62acbe, type: 2}
+    subParameters: []
+    labels: []
+  - name: <color=#0000FF>Utility</color>
+    icon: {fileID: 2800000, guid: 668aa8b1f5d64b7458704cdde788d6c9, type: 3}
+    type: 103
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 11400000, guid: 3505ac148cbf62f4eb0fddf74a1b25ed, type: 2}
+    subParameters: []
+    labels: []
+  - name: <color=#FFA200>Gadget Control</color>
+    icon: {fileID: 2800000, guid: a2647455d65de844dae1b58388f90463, type: 3}
+    type: 103
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 11400000, guid: cee52336b40324d4b90fc80be70b1764, type: 2}
+    subParameters: []
+    labels: []
+  - name: <color=#00FFD7>Apparel</color>
+    icon: {fileID: 2800000, guid: d6bed31922e39f34d8246f6611c96305, type: 3}
+    type: 103
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 11400000, guid: 52a442536ea85c24c8e32d4993fb0287, type: 2}
+    subParameters:
+    - name: 
+    labels: []
+  - name: Face Control
+    icon: {fileID: 2800000, guid: 0a6e2edc406f8734bb985147a4f26878, type: 3}
+    type: 103
+    parameter:
+      name: 
+    value: 1
+    style: 0
+    subMenu: {fileID: 11400000, guid: 01af5c9e9d5cdb04dad7a0e886705b49, type: 2}
+    subParameters: []
+    labels: []
