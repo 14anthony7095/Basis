@@ -509,6 +509,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: BasisMediaPlayer::BasisMediaAudioChannel
   Channel: 100
+  AnalysisFeed: 0
+  AnalysisFeedLatency: 0.05
 --- !u!1 &8238937759899344198
 GameObject:
   m_ObjectHideFlags: 0
@@ -723,6 +725,11 @@ MonoBehaviour:
   StereoEye: 0
   AspectMode: 2
   DisplayAspectOverride: 0
+  Picture:
+    Brightness: 1
+    Contrast: 1
+    Saturation: 1
+    Gamma: 1
 --- !u!114 &5505517674190816405
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -763,6 +770,16 @@ MonoBehaviour:
     AssetBundleIcon: {fileID: 0}
     Tags:
     - MediaPlayer
+    ContentGroupId: 39fdb131686745449fa1ea37775701d320260919
+  SpawnMetaData:
+    Placement: 0
+    Hand: 0
+    HasCustomDistance: 0
+    Distance: 1.5
+    HasCustomScale: 0
+    UniformScale: 1
+    AlignToSurface: 1
+    FaceThePlayer: 0
 --- !u!114 &3404733239259574964
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -803,6 +820,7 @@ MonoBehaviour:
   CanSelfSteal: 1
   LerpToHandOnPickup: 1
   WeldToHand: 1
+  GripPoint: {fileID: 0}
   ShowHighlightOnHover: 1
   DesktopRotateSpeed: 0.1
   DesktopZoopSpeed: 0.2
@@ -813,6 +831,8 @@ MonoBehaviour:
   interactEndLinearVelocityMultiplier: 0
   minAngularVelocity: 0
   interactEndAngularVelocityMultiplier: 0
+  throwWindowSeconds: 0.05
+  throwLookbackSeconds: 0.15
   RigidRef: {fileID: 7733138127675236971}
   InputConstraint:
     rid: 8257204327381467259
